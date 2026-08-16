@@ -1,0 +1,2 @@
+2026-08-17 01:04:28.155 SigmaTetherHelper[30237:16893164] -[DeviceInterface PTP_Command:param:commandType:retry:](317) [WAR] cmd=0x902c retry...1 times
+2026-08-17 01:04:43.458 SigmaTetherHelper[30237:16893164] -[DeviceInterface PTP_Command:param:commandType:retry:](317) [WAR] cmd=0x902c retry...2 times

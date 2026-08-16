@@ -1,0 +1,26 @@
+# build artifacts
+helper/build/
+web/dist/
+web/node_modules/
+launcher/build/
+*.o
+*.dSYM/
+
+# packaged app
+dist/
+*.app/
+
+# macOS
+.DS_Store
+
+# secrets / local overrides
+.env
+.env.local
+config.local.json
+
+# editor
+.vscode/
+.idea/
+
+# Claude Code の Stop hook が吐く会話ログ (公開不可)
+_conversation-logs/
