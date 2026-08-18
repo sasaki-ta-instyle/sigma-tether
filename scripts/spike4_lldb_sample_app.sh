@@ -41,6 +41,19 @@ echo "続行するには Enter..."
 read -r
 
 # LLDB で起動 (attach ではなく launch)
+# NOTE: LLDB の `source` は sourcecode 系のサブコマンド namespace であって
+# スクリプトファイル読込ではない。正しくは `command source <path>`。
+#
+# ただし Rosetta 2 (x86_64 SampleAPP を Apple Silicon で launch) では
+# `run` が "process exited with status -1 (lost connection)" で失敗しがち。
+# その場合は、SampleAPP を Finder で単独起動 → 別 Terminal で以下を実行して
+# attach モードに切替:
+#   pkill -x SampleAPP; cp -R /Volumes/CameraControlSDK_for_Mac/SampleProgram/SampleAPP.app /tmp/
+#   codesign --force --deep --sign - --entitlements <get-task-allow.plist> /tmp/SampleAPP.app
+#   open /tmp/SampleAPP.app
+#   PID=$(pgrep -x SampleAPP) && arch -x86_64 lldb -p "$PID"
+#   (lldb) command source scripts/spike4_lldb_commands.txt
+#   (lldb) continue
 exec /usr/bin/lldb -o "target create $SAMPLE_APP" \
-    -o "source $(dirname "$0")/spike4_lldb_commands.txt" \
+    -o "command source $(dirname "$0")/spike4_lldb_commands.txt" \
     -o "run"
