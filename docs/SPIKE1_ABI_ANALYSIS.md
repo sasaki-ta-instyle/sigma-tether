@@ -113,8 +113,36 @@ DataGroup を取得できる (offset は多分連続取得用の pagination 引�
 
 ## 副次的な TODO (Wave 4 以降で必ず対応)
 
-1. `SgmPictureFileInfoData` を実サイズ (45 bytes 相当) に拡張、実機ダンプでフィールド名確定
-2. `SgmDataGroup2` を 18 UInt8 に拡張、追加 2 フィールドの意味を実機で確認
-3. `SgmSnapState` / `SgmCapStatus` を SDK 実サイズに合わせる
+1. ~~`SgmPictureFileInfoData` を実サイズ (45 bytes 相当) に拡張~~ → 完了 (下記 修正後セクション参照)
+2. ~~`SgmDataGroup2` を 18 UInt8 に拡張~~ → 完了
+3. ~~`SgmSnapState` / `SgmCapStatus` を SDK 実サイズに合わせる~~ → 完了
 4. `sgm_FreeArrayMemory:` の対応 (ConfigAPI 後に directoryEntry を解放しないとリーク)
 5. `PassThrough` struct の完全仕様把握 (Phase 1.5 の PTP RE の下拵え)
+6. `SgmSnapState._pad0` / `SgmCapStatus._pad0` / `SgmDataGroup2._pad0..7` /
+   `SgmPictureFileInfoData2._u16_0a..1c` の意味特定 (実機ダンプで生バイトを解析)
+7. `SgmPictureFileInfoData2._name0/_name1` の memory ownership 確認 (SDK 側 release か
+   我々が retain するか)。現在は `__unsafe_unretained` 宣言
+
+## 修正後 (2026-08-18)
+
+`SDKGateway.h` の struct 4 件を SDK ABI に合わせ、`--abi-dump` サブコマンドを byte-exact
+比較に拡張。結果:
+
+```
+SgmSnapState                    : SDK=CCC                | @encode=CCC                | sizeof=3  | MATCH
+SgmCapStatus                    : SDK=CCCSCC             | @encode=CCCSCC             | sizeof=7  | MATCH
+SgmDataGroup2                   : SDK=CCCCCCCCCCCCCCCCCC | @encode=CCCCCCCCCCCCCCCCCC | sizeof=18 | MATCH
+SgmPictureFileInfoData2         : SDK=CSSS@IISSS@II      | @encode=CSSS@IISSS@II      | sizeof=45 | MATCH
+結果: 0 MISMATCH
+```
+
+`./helper/build/sigma-tether-helper --abi-dump` の exit code = 0 で CI-friendly な
+regression detector として機能する (不一致が 1 件でも出れば exit=1)。フルダンプは
+`docs/debug/abi-dump-after-fix.txt` に保管。
+
+**BLOCKER (`SgmPictureFileInfoData2`) 解消**: SDK が 45 バイトを 45 バイトのバッファに
+書き込むようになり、Wave 1b 突破後の撮影経路でスタック破壊が起きない状態に到達。
+
+**副作用**: 旧 `info.DataLength` / `info.FileCount` の参照はコンパイルエラーになるため、
+`RunCaptureSequence` 側の `DownloadPicture` 内 LogInfo を生バイト dump + 全 field 個別
+出力に切り替え (フィールド名は実機ダンプ待ち)。

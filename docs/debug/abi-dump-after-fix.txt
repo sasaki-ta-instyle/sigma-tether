@@ -1,0 +1,138 @@
+# SDK ABI dump (2026-08-18)
+#
+# 各 class の class/instance methods とその type encoding を全部吐く。
+# 自前宣言 SDKGateway.h と比較して packing / 引数順 / 幅の不一致を検出する。
+#
+# 参考 encoding 表:
+#   v void, c char, i int32, s int16, l long32, q int64, C uchar, I uint32, S uint16, L ulong32, Q uint64
+#   f float, d double, B bool, * char*, @ id, # Class, : SEL, ^X ptr to X, {name=fields} struct
+#   数字は frame offset。例: `i32@0:8@16I24@28` = int返, self@0, _cmd@8, id@16, uint32@24, id@28
+#
+
+=== +[DeviceInterface] (11 methods) ===
+  +sgm_GetLastCommandData:resData:                                        i32@0:8^@16^@24
+  +sgm_SetComLogFunc:                                                     i24@0:8@?16
+  +sgm_SetIsCallComLogFunc:                                               i20@0:8c16
+  +sgm_initializeSDK                                                      i16@0:8
+  +sgm_terminateSDK                                                       i16@0:8
+  +getPtpTimeout                                                          d16@0:8
+  +sgm_CamOpen:                                                           i24@0:8@16
+  +sgm_CamClose:                                                          i24@0:8@16
+  +sgm_FreeArrayMemory:                                                   i24@0:8^{_IFDArray=II^{_SgmDirectoryEntry}}16
+  +sgm_GetActiveDriverInstance                                            @16@0:8
+  +getInstance                                                            @16@0:8
+=== +[sgm_ConfigAPI] (1 methods) ===
+  +sgm_ConfigAPI:AdjustmentMode:cameraHandle:                             i36@0:8^{_IFDArray=II^{_SgmDirectoryEntry}}16I24@28
+=== +[sgm_GetCamStatus2] (17 methods) ===
+  +sgm_GetCamStatus2:buffLength:recvLength:operationCode1:operationCode2:operationCode3:cameraHandle: i56@0:8^{_IFDArray=II^{_SgmDirectoryEntry}}16I24^I28I36I40I44@48
+  +sgm_GetCamStatus2_DataGroup1:offset:grp1:                              i36@0:8*16I24^{_SgmDataGroup1=CCCCCCCCCCCSCSCCCC}28
+  +sgm_GetCamStatus2_DataGroup2:offset:grp2:                              i36@0:8*16I24^{_SgmDataGroup2=CCCCCCCCCCCCCCCCCC}28
+  +sgm_GetCamStatus2_DataGroup3:offset:grp3:                              i36@0:8*16I24^{_SgmDataGroup3=CCCCCCCCSSCCCCCCCC}28
+  +sgm_GetCamStatus2_DataGroup4:offset:grp4:                              i36@0:8*16I24^{_SgmDataGroup4=CCCCCCCCCCCCCCCCCCCCC}28
+  +sgm_GetCamStatus2_DataGroup5:offset:grp5:                              i36@0:8*16I24^{_SgmDataGroup5=SSCSCSCCCCCCCCCSCCCCCCCCCCC}28
+  +sgm_GetCamStatus2_DataGroup6:offset:grp6:                              i36@0:8*16I24^{_SgmDataGroup6=SCCCCCcccCCCcccCCCcccCCCcccCCCcccCC}28
+  +sgm_GetCamStatus2_DataGroupFocus:offset:grpFocus:                      i36@0:8*16I24^{_IFDArray=II^{_SgmDirectoryEntry}}28
+  +sgm_GetCamStatus2_DataGroupMovie:offset:grpMovie:                      i36@0:8*16I24^{_IFDArray=II^{_SgmDirectoryEntry}}28
+  +sgm_GetCamStatus2_CamCanSetInfo:offset:info1:                          i36@0:8*16I24^{_SgmCanSetInfo=CCCCCSCCCCCCCCCSCCCCCCSCCCSCCCCC}28
+  +sgm_GetCamStatus2_CamCanSetInfo2:offset:info2:                         i36@0:8*16I24^{_SgmCanSetInfo2=SCSSSISSSSCCCCCCCCCCCCCCCCCCCCSCCCSSCCCC}28
+  +sgm_GetCamStatus2_CamCanSetInfo3:offset:info3:                         i36@0:8*16I24^{_SgmCanSetInfo3=SCSSSISSSSCCCCCCCCCCCCCCCCCCCCSCCCSSCCCCSSCSSSSCCCCCCCCSCCCCSSSSSSSSSSCCCCCSC}28
+  +sgm_GetCamStatus2_CamCanSetInfo4:offset:info4:                         i36@0:8*16I24^{_SgmCanSetInfo4=SCSSSCCCCCCCCCCCCCCCCCCCCSCCCSSCCCCSSCSSSSCCCCCCCCSCCCCSSSSSSSSSSCCCCCSCCC}28
+  +sgm_GetCamStatus2_CamCanSetInfo5:offset:info5:                         i36@0:8*16I24^{_IFDArray=II^{_SgmDirectoryEntry}}28
+  +sgm_GetCamStatus2_CamViewFrame:offset:viewFrame:bufSize:               i40@0:8*16I24*28I36
+  +getTagName:                                                            @20@0:8i16
+  +getTypeSize:                                                           i20@0:8i16
+=== +[sgm_GetCamDataGroup2] (1 methods) ===
+  +sgm_GetCamDataGroup2:cameraHandle:                                     i32@0:8^{_SgmDataGroup2=CCCCCCCCCCCCCCCCCC}16@24
+=== +[sgm_SetCamDataGroup2] (1 methods) ===
+  +sgm_SetCamDataGroup2:fieldPresent1:fieldPresent2:cameraHandle:         i40@0:8^{_SgmDataGroup2=CCCCCCCCCCCCCCCCCC}16C24C28@32
+=== +[sgm_SnapCommand] (1 methods) ===
+  +sgm_SnapCommand:cameraHandle:                                          i32@0:8^{_SgmSnapState=CCC}16@24
+=== +[sgm_GetCamCaptStatus] (1 methods) ===
+  +sgm_GetCamCaptStatus:imageID:cameraDevice:                             i36@0:8^{_SgmCaptStatus=CCCSCC}16C24@28
+=== +[sgm_GetPictFileInfo2] (1 methods) ===
+  +sgm_GetPictFileInfo2:cameraHandle:                                     i32@0:8^{_SgmPictureFileInfoData=CSSS@IISSS@II}16@24
+=== +[sgm_GetBigPartialPictFile] (1 methods) ===
+  +sgm_GetBigPartialPictFile:start:length:data:dataSize:cameraHandle:     i52@0:8I16I20I24^*28^I36@44
+=== +[sgm_ClearImageDBSingle] (1 methods) ===
+  +sgm_ClearImageDBSingle:cameraHandle:                                   i28@0:8C16@20
+=== +[sgm_CloseApplication] (1 methods) ===
+  +sgm_CloseApplication:                                                  i24@0:8@16
+
+# --- DeviceInterface instance methods (参考: PTP_Command 系) ---
+
+=== -[DeviceInterface] (16 methods) ===
+  -didSendPTPCommand:inData:response:error:contextInfo:                   v56@0:8@16@24@32@40^v48
+  -PTP_Command:param:commandType:                                         i36@0:8@16^{PassThrough=S[5I]SII@S[5I]SQ^v}24i32
+  -PTP_Command:param:commandType:retry:                                   i40@0:8@16^{PassThrough=S[5I]SII@S[5I]SQ^v}24i32i36
+  -getCommandData                                                         @16@0:8
+  -getResponseData                                                        @16@0:8
+  -PTP_SendCommand:param:retry:                                           i36@0:8@16^{PassThrough=S[5I]SII@S[5I]SQ^v}24i32
+  -lock4Icc                                                               @16@0:8
+  -lock4IccTrans                                                          @16@0:8
+  -PTP_ReceiveData:param:retry:                                           i36@0:8@16^{PassThrough=S[5I]SII@S[5I]SQ^v}24i32
+  -PTP_SendData:param:retry:                                              i36@0:8@16^{PassThrough=S[5I]SII@S[5I]SQ^v}24i32
+  -dealloc                                                                v16@0:8
+  -init                                                                   @16@0:8
+  -.cxx_destruct                                                          v16@0:8
+  -buffer                                                                 *16@0:8
+  -dataLength                                                             Q16@0:8
+  -bufferLength                                                           Q16@0:8
+
+# --- 我々の自前宣言 (SDKGateway.h) から @encode で組み立てた期待値 ---
+
++sgm_ConfigAPI:AdjustmentMode:cameraHandle: 期待
+  return int = i
+  arg SgmAdjustmentConfig* = ^{?=II^v}
+  arg UInt32 = I
+  arg ICCameraDevice* = @
+
++sgm_GetCamStatus2:buffLength:recvLength:operationCode1:operationCode2:operationCode3:cameraHandle: 期待
+  return int = i
+  arg void* = ^v
+  arg UInt32 = I
+  arg UInt32* = ^I
+  arg UInt32 = I
+  arg UInt32 = I
+  arg UInt32 = I
+  arg ICCameraDevice* = @
+
++sgm_SnapCommand:cameraHandle: 期待
+  return int = i
+  arg SgmSnapState* = ^{?=CCC} (sizeof=3)
+  arg ICCameraDevice* = @
+
++sgm_GetCamCaptStatus:imageID:cameraDevice: 期待
+  return int = i
+  arg SgmCapStatus* = ^{?=CCCSCC} (sizeof=7)
+  arg UInt8 = C
+  arg ICCameraDevice* = @
+
++sgm_SetCamDataGroup2:fieldPresent1:fieldPresent2:cameraHandle: 期待
+  return int = i
+  arg SgmDataGroup2* = ^{?=CCCCCCCCCCCCCCCCCC} (sizeof=18)
+  arg UInt8 fp1 = C
+  arg UInt8 fp2 = C
+  arg ICCameraDevice* = @
+
++sgm_GetBigPartialPictFile:start:length:data:dataSize:cameraHandle: 期待
+  return int = i
+  arg storeAddress UInt32 = I
+  arg startAddress UInt32 = I
+  arg maxLength UInt32 = I
+  arg data UInt8** = ^*
+  arg dataSize UInt32* = ^I
+  arg ICCameraDevice* = @
+
++sgm_GetPictFileInfo2:cameraHandle: 期待
+  return int = i
+  arg SgmPictureFileInfoData2* = ^{?=CSSS@IISSS@II} (sizeof=45)
+  arg ICCameraDevice* = @
+
+# --- byte-exact ABI 一致検証 (Spike 1 修正後) ---
+
+  SgmSnapState                    : SDK=CCC                      | @encode=CCC                      | sizeof=3 | MATCH
+  SgmCapStatus                    : SDK=CCCSCC                   | @encode=CCCSCC                   | sizeof=7 | MATCH
+  SgmDataGroup2                   : SDK=CCCCCCCCCCCCCCCCCC       | @encode=CCCCCCCCCCCCCCCCCC       | sizeof=18 | MATCH
+  SgmPictureFileInfoData2         : SDK=CSSS@IISSS@II            | @encode=CSSS@IISSS@II            | sizeof=45 | MATCH
+
+# 結果: 0 MISMATCH

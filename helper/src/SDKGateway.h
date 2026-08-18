@@ -47,19 +47,26 @@ static inline BOOL SgmSucceeded(int r) { return r == 0 || r == SgmResultOK; }
 
 #pragma mark - Capture (SDK PDF 4-24, 4-25)
 
+// SDK ABI (2026-08-18 method_getTypeEncoding ダンプ): _SgmSnapState=CCC (3 bytes)
+// PDF は 2 バイトと記載していたが、SDK 実装は 3 バイト。追加 1 バイトの意味は
+// 未確定なので末尾 _pad で埋める。実 field 意味は Wave 1b 撮影経路デバッグで判定。
 typedef struct __attribute__((packed)) {
     UInt8 CaptureMode;    // 0x01 General Capture / 0x02 Non-AF / 0x03 AF Drive Only
                           // 0x04 Start AF / 0x05 Stop AF / 0x06 Start Capture / 0x07 Stop Capture
                           // 0x10 Movie w/AF / 0x20 Movie w/o AF / 0x30 Stop Movie
     UInt8 CaptureAmount;  // 連続撮影枚数、単写は 0x01
+    UInt8 _pad0;          // SDK ABI 一致用 (意味未確定, TODO Wave 1b 突破後に field 名確定)
 } SgmSnapState;
 
+// SDK ABI (2026-08-18 ダンプ): _SgmCaptStatus=CCCSCC (7 bytes)
+// PDF は 6 バイト (CCCSC) と記載していたが SDK 実装は末尾 1 バイト多い。
 typedef struct __attribute__((packed)) {
     UInt8  ImageID;
     UInt8  ImageDBHead;
     UInt8  ImageDBTail;
     UInt16 CaptStatus;
     UInt8  DestToSave;    // 0x01 カメラ内メディア / 0x02 PC / 0x03 両方
+    UInt8  _pad0;         // SDK ABI 一致用 (意味未確定, TODO Wave 1b 突破後に field 名確定)
 } SgmCapStatus;
 
 typedef NS_ENUM(UInt16, SgmCaptStatus) {
@@ -83,11 +90,28 @@ typedef NS_ENUM(UInt16, SgmCaptStatus) {
 
 #pragma mark - PictFileInfo (SDK PDF 4-27, 4-28)
 
+// SDK ABI (2026-08-18 ダンプ): _SgmPictureFileInfoData=CSSS@IISSS@II (45 bytes)
+//
+// PDF は「DataLength / FileCount の 2 UInt32」しか記載しておらず、実際の SDK は
+// 45 バイトを書き込む。8 バイトで受けると 37 バイトのスタック破壊が起きる (🔴 BLOCKER)。
+// フィールド名は不明なので実 layout をそのまま宣言する。おそらく 2 セット (main
+// image + thumbnail?) の (UInt8 flag + UInt16×3 + NSString name + UInt32×2 size)。
+// `@` は Objective-C object pointer (id, 8 bytes)。ARC 管理を避けるため
+// __unsafe_unretained を使う (SDK が NSString の memory owner)。
 typedef struct __attribute__((packed)) {
-    UInt32 DataLength;
-    UInt32 FileCount;
-    // NOTE: PDF 上 FileCount 以降のフィールド定義なし。
-    //       実機ダンプで FileSize / FileName 相当があれば拡張する。
+    UInt8  _flag0;
+    UInt16 _u16_0a;
+    UInt16 _u16_0b;
+    UInt16 _u16_0c;
+    __unsafe_unretained NSString *_name0;
+    UInt32 _u32_0a;      // 推定: FileSize
+    UInt32 _u32_0b;      // 推定: DataLength
+    UInt16 _u16_1a;
+    UInt16 _u16_1b;
+    UInt16 _u16_1c;
+    __unsafe_unretained NSString *_name1;
+    UInt32 _u32_1a;
+    UInt32 _u32_1b;
 } SgmPictureFileInfoData2;
 
 #pragma mark - DataGroup2 (SDK PDF p.16 抜粋、Wave 1 で最小限だけ)
@@ -110,6 +134,9 @@ typedef NS_ENUM(UInt8, SgmSpecialMode) {
 // PDF の DataGroup2 構造体は全フィールドを含むが、Wave 1 は「ImageQuality
 // と SpecialMode を書ければよい」ので、パディングを含む安全側の layout で
 // 宣言する。全フィールドは Wave 5 の SettingsBridge で網羅する。
+// SDK ABI (2026-08-18 ダンプ): _SgmDataGroup2=CCCCCCCCCCCCCCCCCC (18× UInt8, 18 bytes)
+// PDF は 16 バイトと記載していたが SDK 実装は 18 バイト。追加 2 バイトの意味は
+// 未確定なので `_reserved[8]` で埋める (末尾 8 バイトが reserved 扱い)。
 typedef struct __attribute__((packed)) {
     UInt8 DriveMode;         // b0 of FP1
     UInt8 SpecialMode;       // b1
@@ -121,7 +148,10 @@ typedef struct __attribute__((packed)) {
     UInt8 WhiteBalance;      // b7
     UInt8 Resolution;        // b0 of FP2
     UInt8 ImageQuality;      // b1
-    UInt8 _reserved[6];      // safety padding
+    // SDK ABI 一致用 padding: 8 UInt8 (総 18 bytes)。意味未確定なので個別 field 名で
+    // 宣言し、@encode が SDK 側 "CCCCCCCCCCCCCCCCCC" と byte-exact 一致するようにする
+    // (配列 [8C] だと文字列表現が変わり比較が失敗する)。
+    UInt8 _pad0, _pad1, _pad2, _pad3, _pad4, _pad5, _pad6, _pad7;
 } SgmDataGroup2;
 
 // FieldPresent bit for DataGroup2 (PDF p.16)

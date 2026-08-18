@@ -44,8 +44,16 @@ fpL 実機接続で helper を走らせ、**セッション Open + content catal
 
 Codex の指摘: Wave 1b の壁を「Developer ID 署名不足」と見た仮説は**弱い**（PTP 送信処理まで到達しているのが観測できているため）。以下 5 項目を先に消化する。
 
-1. **Objective-C ABI 一致検証**
-   `class_getClassMethod([sgm_ConfigAPI class], @selector(sgm_ConfigAPI:AdjustmentMode:cameraHandle:))` で取得したメソッドの `method_getTypeEncoding()` を dump し、自前宣言と比較。ポインタ幅・`UInt32`・構造体 packing・引数順が一致するかを確認。他の 27 fw クラスの主要 selector も全部照合。**不一致があれば PTP レスポンス受信時に stack を壊して SDK が retry ループに落ちる可能性がある**
+1. ✅ **Objective-C ABI 一致検証** (2026-08-18 完了)
+   `--abi-dump` サブコマンドで SDK 実 selector 署名を `method_getTypeEncoding` で全部
+   ダンプ。**4 件の struct 不一致を発見** (`SgmPictureFileInfoData` 8→45 bytes が 🔴 BLOCKER、
+   `SgmDataGroup2` 16→18 bytes、`SgmSnapState` 2→3 bytes、`SgmCapStatus` 6→7 bytes)。
+   同日中に `SDKGateway.h` を修正、`--abi-dump` を byte-exact 比較に拡張して 4 件すべて
+   MATCH / exit=0 を確認。詳細は `docs/SPIKE1_ABI_ANALYSIS.md` / dump は
+   `docs/debug/abi-dump-2026-08-18.txt` (修正前) + `docs/debug/abi-dump-after-fix.txt` (修正後)。
+   → **PTP 応答受信時のスタック破壊リスクを除去**。ただし SDK が呼び出し ABI (`sgm_ConfigAPI` /
+   `sgm_GetCamStatus2`) 自体は完全一致していたので、Wave 1b の PTP 応答壁の直接原因では
+   なさそう。Spike 2/3/4/5 に続く。
 2. **標準 PTP `GetDeviceInfo (0x1001)` を SDK バイパスで直接送信**
    `sgm_*` を通さず、`ICCameraDevice.requestSendPTPCommand:outData:sendCommandDelegate:didSendCommandSelector:contextInfo:` で `0x1001` を直接送って completion が返るか確認。**返れば ICC transport 層は健全 → SDK 内部の問題に絞れる**、返らなければ ICC/TCC/USB 層の問題
 3. **main queue 自己待ち対照試験**

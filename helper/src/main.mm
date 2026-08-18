@@ -286,7 +286,17 @@ static NSData * DownloadPicture(ICCameraDevice *cam, UInt8 imageID) {
     LogSdk(@"sgm_GetPictFileInfo2", rc);
     TraceLastPTP(@"sgm_GetPictFileInfo2");
     if (!SgmSucceeded(rc)) return nil;
-    LogInfo(@"PictFileInfo2: DataLength=%u FileCount=%u", info.DataLength, info.FileCount);
+    // NOTE: SDK ABI が PDF と食い違うと発覚 (Spike 1)。旧 DataLength/FileCount は
+    // 存在しない。実際は 2 セットの (UInt8 flag + UInt16×3 + NSString + UInt32×2)。
+    // 意味未確定なので生バイトをそのまま dump し、Wave 1b 突破後に field 名を確定させる。
+    LogInfo(@"PictFileInfo2: raw=%@",
+            [NSData dataWithBytes:&info length:sizeof(info)]);
+    LogInfo(@"PictFileInfo2 [set0]: flag=%u u16=(%u,%u,%u) name=%@ u32=(%u,%u)",
+            info._flag0, info._u16_0a, info._u16_0b, info._u16_0c,
+            info._name0, info._u32_0a, info._u32_0b);
+    LogInfo(@"PictFileInfo2 [set1]: u16=(%u,%u,%u) name=%@ u32=(%u,%u)",
+            info._u16_1a, info._u16_1b, info._u16_1c,
+            info._name1, info._u32_1a, info._u32_1b);
 
     const UInt32 storeAddress = imageID;
     const UInt32 chunkSize    = 1024 * 1024;
@@ -609,6 +619,113 @@ static void DumpOurEncodingExpectations(void) {
     printf("  arg ICCameraDevice* = %s\n", @encode(ICCameraDevice *));
 }
 
+// --------------------------------------------------------------------------
+// Spike 1 修正後の byte-exact 一致検証
+//
+// SDK 側 method_getTypeEncoding から struct 引数の encoding を取り出し、
+// 我々の @encode(struct*) の encoding と field 部だけを比較する。
+// SDK: `^{_SgmXxx=CCC}` / 我々: `^{?=CCC}` → 内側 `CCC` が一致すれば MATCH。
+//
+// 4 struct すべて MATCH でなければ exit code = 1 を返して CI で検知可能にする。
+// --------------------------------------------------------------------------
+
+// 与えられた encoding 文字列 `s` の中で、最初の `{` から対応する `}` までの
+// struct フィールド部 (`=` 以降 `}` 直前まで) を newly-allocated C string として返す。
+// 見つからなければ NULL。呼び出し側が free() する。
+static char * ExtractStructFieldsFromEncoding(const char *s) {
+    if (!s) return NULL;
+    const char *brace = strchr(s, '{');
+    if (!brace) return NULL;
+    const char *eq = strchr(brace, '=');
+    if (!eq) return NULL;
+    // 対応する '}' を depth counter で探す (ネスト構造対応)
+    const char *p = eq + 1;
+    int depth = 1;
+    while (*p) {
+        if (*p == '{') depth++;
+        else if (*p == '}') { depth--; if (depth == 0) break; }
+        p++;
+    }
+    if (depth != 0) return NULL;
+    size_t len = (size_t)(p - (eq + 1));
+    char *out = (char *)malloc(len + 1);
+    if (!out) return NULL;
+    memcpy(out, eq + 1, len);
+    out[len] = '\0';
+    return out;
+}
+
+// class method の SEL を method_getTypeEncoding で解決する
+static const char * TypeEncodingForClassMethod(Class cls, SEL sel) {
+    Method m = class_getClassMethod(cls, sel);
+    return m ? method_getTypeEncoding(m) : NULL;
+}
+
+// 1 struct 分の比較を printf しつつ、mismatch なら global fail flag を立てる
+static int g_abiMismatchCount = 0;
+
+static void CompareStruct(const char *label,
+                          const char *sdkMethodEncoding,
+                          const char *ourFieldsEncoding,
+                          size_t ourSizeof) {
+    char *sdkFields = ExtractStructFieldsFromEncoding(sdkMethodEncoding);
+    if (!sdkFields) {
+        printf("  %-32s: SDK encoding 取得失敗 (source=%s)\n", label, sdkMethodEncoding ?: "(null)");
+        g_abiMismatchCount++;
+        return;
+    }
+    // 我々側 @encode(SgmXxx*) は "^{?=CCC}" のように来るので中身抽出
+    char *ourFields = ExtractStructFieldsFromEncoding(ourFieldsEncoding);
+    if (!ourFields) {
+        printf("  %-32s: 我々の encoding 取得失敗 (source=%s)\n", label, ourFieldsEncoding ?: "(null)");
+        free(sdkFields);
+        g_abiMismatchCount++;
+        return;
+    }
+    BOOL match = (strcmp(sdkFields, ourFields) == 0);
+    printf("  %-32s: SDK=%-24s | @encode=%-24s | sizeof=%zu | %s\n",
+           label, sdkFields, ourFields, ourSizeof, match ? "MATCH" : "MISMATCH");
+    if (!match) g_abiMismatchCount++;
+    free(sdkFields);
+    free(ourFields);
+}
+
+static int VerifyStructAbiMatches(void) {
+    printf("\n# --- byte-exact ABI 一致検証 (Spike 1 修正後) ---\n\n");
+    g_abiMismatchCount = 0;
+
+    // SgmSnapState: 引数 1 番目 (sgm_SnapCommand:cameraHandle:)
+    CompareStruct("SgmSnapState",
+                  TypeEncodingForClassMethod([sgm_SnapCommand class],
+                                             @selector(sgm_SnapCommand:cameraHandle:)),
+                  @encode(SgmSnapState *),
+                  sizeof(SgmSnapState));
+
+    // SgmCapStatus: sgm_GetCamCaptStatus:imageID:cameraDevice:
+    CompareStruct("SgmCapStatus",
+                  TypeEncodingForClassMethod([sgm_GetCamCaptStatus class],
+                                             @selector(sgm_GetCamCaptStatus:imageID:cameraDevice:)),
+                  @encode(SgmCapStatus *),
+                  sizeof(SgmCapStatus));
+
+    // SgmDataGroup2: sgm_SetCamDataGroup2:fieldPresent1:fieldPresent2:cameraHandle:
+    CompareStruct("SgmDataGroup2",
+                  TypeEncodingForClassMethod([sgm_SetCamDataGroup2 class],
+                                             @selector(sgm_SetCamDataGroup2:fieldPresent1:fieldPresent2:cameraHandle:)),
+                  @encode(SgmDataGroup2 *),
+                  sizeof(SgmDataGroup2));
+
+    // SgmPictureFileInfoData2: sgm_GetPictFileInfo2:cameraHandle:
+    CompareStruct("SgmPictureFileInfoData2",
+                  TypeEncodingForClassMethod([sgm_GetPictFileInfo2 class],
+                                             @selector(sgm_GetPictFileInfo2:cameraHandle:)),
+                  @encode(SgmPictureFileInfoData2 *),
+                  sizeof(SgmPictureFileInfoData2));
+
+    printf("\n# 結果: %d MISMATCH\n", g_abiMismatchCount);
+    return g_abiMismatchCount;
+}
+
 // spike モード判定用のグローバル
 static BOOL g_spike2Mode = NO;   // 標準 PTP 0x1001 直接送信
 static BOOL g_spike3Mode = NO;   // main queue 自己待ち対照試験 (専用 worker から発行)
@@ -619,7 +736,8 @@ int main(int argc, const char * argv[]) {
         if (argc >= 2 && strcmp(argv[1], "--abi-dump") == 0) {
             DumpABI();
             DumpOurEncodingExpectations();
-            return 0;
+            int mismatch = VerifyStructAbiMatches();
+            return mismatch == 0 ? 0 : 1;
         }
         if (argc >= 2 && strcmp(argv[1], "--spike2") == 0) {
             g_spike2Mode = YES;
