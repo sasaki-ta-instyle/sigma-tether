@@ -47,26 +47,28 @@ static inline BOOL SgmSucceeded(int r) { return r == 0 || r == SgmResultOK; }
 
 #pragma mark - Capture (SDK PDF 4-24, 4-25)
 
-// SDK ABI (2026-08-18 method_getTypeEncoding ダンプ): _SgmSnapState=CCC (3 bytes)
-// PDF は 2 バイトと記載していたが、SDK 実装は 3 バイト。追加 1 バイトの意味は
-// 未確定なので末尾 _pad で埋める。実 field 意味は Wave 1b 撮影経路デバッグで判定。
+// SDK ABI (2026-08-18 method_getTypeEncoding ダンプ): _SgmSnapState=CCC (3 UInt8)
+// PDF は 2 バイトと記載していたが SDK 実装は 3 バイト。追加 1 バイトの意味も配置も
+// 未確定 (encoding が同じ CCC のため文字列比較では offset を区別できない)。
+// 一時的に末尾 _unknown0 で埋めているが、実位置は LLDB で SampleAPP を追って確認する。
 typedef struct __attribute__((packed)) {
     UInt8 CaptureMode;    // 0x01 General Capture / 0x02 Non-AF / 0x03 AF Drive Only
                           // 0x04 Start AF / 0x05 Stop AF / 0x06 Start Capture / 0x07 Stop Capture
                           // 0x10 Movie w/AF / 0x20 Movie w/o AF / 0x30 Stop Movie
     UInt8 CaptureAmount;  // 連続撮影枚数、単写は 0x01
-    UInt8 _pad0;          // SDK ABI 一致用 (意味未確定, TODO Wave 1b 突破後に field 名確定)
+    UInt8 _unknown0;      // TODO: SampleAPP LLDB で offset 確定 (現状「末尾」は仮定)
 } SgmSnapState;
 
-// SDK ABI (2026-08-18 ダンプ): _SgmCaptStatus=CCCSCC (7 bytes)
-// PDF は 6 バイト (CCCSC) と記載していたが SDK 実装は末尾 1 バイト多い。
+// SDK ABI (2026-08-18 ダンプ): _SgmCaptStatus=CCCSCC (7 バイト)
+// PDF の CCCSC (6 バイト) より 1 バイト多い。encoding 文字列が S を挟む形になっている
+// ため、追加バイトは末尾である確度が高い (Codex Medium 5)。ただし LLDB で確定させる。
 typedef struct __attribute__((packed)) {
     UInt8  ImageID;
     UInt8  ImageDBHead;
     UInt8  ImageDBTail;
     UInt16 CaptStatus;
     UInt8  DestToSave;    // 0x01 カメラ内メディア / 0x02 PC / 0x03 両方
-    UInt8  _pad0;         // SDK ABI 一致用 (意味未確定, TODO Wave 1b 突破後に field 名確定)
+    UInt8  _unknown0;     // TODO: SampleAPP LLDB で offset 確定
 } SgmCapStatus;
 
 typedef NS_ENUM(UInt16, SgmCaptStatus) {
@@ -148,10 +150,12 @@ typedef struct __attribute__((packed)) {
     UInt8 WhiteBalance;      // b7
     UInt8 Resolution;        // b0 of FP2
     UInt8 ImageQuality;      // b1
-    // SDK ABI 一致用 padding: 8 UInt8 (総 18 bytes)。意味未確定なので個別 field 名で
-    // 宣言し、@encode が SDK 側 "CCCCCCCCCCCCCCCCCC" と byte-exact 一致するようにする
-    // (配列 [8C] だと文字列表現が変わり比較が失敗する)。
-    UInt8 _pad0, _pad1, _pad2, _pad3, _pad4, _pad5, _pad6, _pad7;
+    // SDK ABI 一致用: 追加 8 UInt8 (総 18 バイト)。encoding が同じ C の連続なので
+    // 位置は encoding からは区別できない (Codex Critical 1 / High 5)。
+    // 実位置は LLDB で SampleAPP を追って確定させる。個別 field 名で宣言しているのは
+    // @encode が SDK 側 "CCCCCCCCCCCCCCCCCC" と文字列一致するため (配列 [8C] だと崩れる)。
+    UInt8 _unknown0, _unknown1, _unknown2, _unknown3,
+          _unknown4, _unknown5, _unknown6, _unknown7;
 } SgmDataGroup2;
 
 // FieldPresent bit for DataGroup2 (PDF p.16)
@@ -185,11 +189,18 @@ static const UInt8 SgmDG2_FP1_SpecialMode          = 0x02;  // b1
 // SDK PDF p.12, 5-5 に記載の IFD 構造。SgmDirectoryEntry の中身は詳細不明
 // のため void* で扱う。実運用では SDK が directoryEntry を alloc して返し、
 // sgm_FreeArrayMemory: で解放する想定。
+//
+// SDK 側では `_IFDArray = II^{_SgmDirectoryEntry}` として現れる (sgm_FreeArrayMemory:
+// / sgm_ConfigAPI / sgm_GetCamStatus2 系の引数)。同一レイアウトなので typedef 別名
+// にして「ABI 上は同じもの」であることを明示 (Codex Medium 7)。
 typedef struct __attribute__((packed)) {
     UInt32 dataLength;
     UInt32 directoryCount;
     void * _Nullable directoryEntry;   // SgmDirectoryEntry* (詳細後日)
-} SgmAdjustmentConfig;
+} SgmIFDArray;
+
+// SgmAdjustmentConfig は SgmIFDArray の PDF 命名。ABI 上は完全同一。
+typedef SgmIFDArray SgmAdjustmentConfig;
 
 #pragma mark - PassThrough (SDK 内部 PTP コマンド構造体)
 
@@ -212,18 +223,20 @@ typedef struct __attribute__((packed)) {
 // packed 前提の内部レイアウト。field 名は推定なので実機実験で確定させる。
 // SDK の PTP_Command 系はこの構造体経由で全 PTP コマンドを送るため、
 // sgm_* 層をバイパスして直接コマンド発行できる (Spike 2b 用途)。
+// NOTE: field 名は全部推定。encoding (S[5I]SII@S[5I]SQ^v) は SDK と一致するが、
+// 意味論と offset は LLDB で SampleAPP を追って確定させる (Codex Critical 1 / 2)。
 typedef struct __attribute__((packed)) {
-    UInt16 opCode;
-    UInt32 cmdParams[5];
-    UInt16 _pad0;
-    UInt32 dataLength;
-    UInt32 transactionID;
-    __unsafe_unretained id data;
-    UInt16 respCode;
-    UInt32 respParams[5];
-    UInt16 _pad1;
-    UInt64 payloadSize;
-    void * _Nullable payload;
+    UInt16 opCode;                       // 推定
+    UInt32 cmdParams[5];                 // 推定: 送信 param
+    UInt16 _unknown_after_cmdParams;     // encoding 上の S、意味未確定
+    UInt32 dataLength;                   // 推定
+    UInt32 transactionID;                // 推定
+    __unsafe_unretained id data;         // 推定: NSData for SendData 経路
+    UInt16 respCode;                     // 推定: PTP ResponseCode (0x2001=OK)
+    UInt32 respParams[5];                // 推定: 応答 param
+    UInt16 _unknown_after_respParams;    // encoding 上の S、意味未確定
+    UInt64 payloadSize;                  // 推定: 受信データサイズ
+    void * _Nullable payload;            // 推定: 受信データポインタ
 } SgmPassThrough;
 
 // PTP コマンドタイプ (PTP_Command の 3rd 引数): 推定
@@ -339,5 +352,35 @@ typedef struct __attribute__((packed)) {
 @end
 
 NS_ASSUME_NONNULL_END
+
+// --------------------------------------------------------------------------
+// 自前 struct の sizeof / offsetof 固定 (Codex Critical 1)
+//
+// method_getTypeEncoding は SDK 側 field の並びは吐くが offset は吐かない。
+// また `CCC` のように同じ型が連続する encoding では offset の位置を区別できない。
+// これらの static_assert は「自前仮説」を固定するもので、SDK 側との一致証明では
+// ない (SDK 側の実 offset は LLDB で SampleAPP を追って確認する)。
+// 未来の誰かが field 順を変えても、ここでビルドが弾く。
+// --------------------------------------------------------------------------
+_Static_assert(sizeof(SgmSnapState) == 3, "SgmSnapState must be 3 bytes");
+_Static_assert(sizeof(SgmCapStatus) == 7, "SgmCapStatus must be 7 bytes");
+_Static_assert(sizeof(SgmDataGroup2) == 18, "SgmDataGroup2 must be 18 bytes");
+_Static_assert(sizeof(SgmPictureFileInfoData2) == 45, "SgmPictureFileInfoData2 must be 45 bytes");
+_Static_assert(sizeof(SgmPassThrough) == 80, "SgmPassThrough must be 80 bytes");
+_Static_assert(sizeof(SgmIFDArray) == 16, "SgmIFDArray must be 16 bytes");
+
+// SgmPassThrough の主要 offset (自前仮説)
+_Static_assert(offsetof(SgmPassThrough, opCode) == 0, "opCode at 0");
+_Static_assert(offsetof(SgmPassThrough, cmdParams) == 2, "cmdParams at 2");
+_Static_assert(offsetof(SgmPassThrough, dataLength) == 24, "dataLength at 24");
+_Static_assert(offsetof(SgmPassThrough, respCode) == 40, "respCode at 40");
+_Static_assert(offsetof(SgmPassThrough, respParams) == 42, "respParams at 42");
+_Static_assert(offsetof(SgmPassThrough, payloadSize) == 64, "payloadSize at 64");
+_Static_assert(offsetof(SgmPassThrough, payload) == 72, "payload at 72");
+
+// SgmPictureFileInfoData2 の主要 offset (自前仮説)
+_Static_assert(offsetof(SgmPictureFileInfoData2, _flag0) == 0, "flag0 at 0");
+_Static_assert(offsetof(SgmPictureFileInfoData2, _name0) == 7, "name0 at 7");
+_Static_assert(offsetof(SgmPictureFileInfoData2, _name1) == 29, "name1 at 29");
 
 #endif  // SDKGATEWAY_H

@@ -128,7 +128,7 @@
   arg SgmPictureFileInfoData2* = ^{?=CSSS@IISSS@II} (sizeof=45)
   arg ICCameraDevice* = @
 
-# --- byte-exact ABI 一致検証 (Spike 1 修正後) ---
+# --- field-type-sequence ABI 一致検証 (Spike 1 修正後 / packing・offset は未検証) ---
 
   SgmSnapState                    : SDK=CCC                      | @encode=CCC                      | sizeof=3 | MATCH
   SgmCapStatus                    : SDK=CCCSCC                   | @encode=CCCSCC                   | sizeof=7 | MATCH

@@ -138,9 +138,36 @@ SgmPassThrough          : SDK=S[5I]SII@S[5I]SQ^v | @encode=S[5I]SII@S[5I]SQ^v | 
 ```
 
 `SgmPassThrough` は Wave 1b の 2 巡目 (2026-08-18 セッション後半) で追加。SDK 内部の
-PTP コマンド構造体を byte-exact に宣言し、`--spike2b` で SDK 内部 PTP_Command 経由の
-GetDeviceInfo 送信ができるようになった。同じセッションで `sgm_FreeArrayMemory:` も
-呼び忘れを解消 (Spike 1 副次 TODO #4)。
+PTP コマンド構造体を **field 型並び (encoding) 一致** で宣言し、`--spike2b` で SDK 内部
+PTP_Command 経由の GetDeviceInfo 送信ができるようになった。同じセッションで
+`sgm_FreeArrayMemory:` も呼び忘れを解消 (Spike 1 副次 TODO #4)。
+
+## Codex 外部レビュー反映 (2026-08-18 セッション終端)
+
+Codex に外部レビューを依頼して以下を修正:
+
+- **表現の弱化**: 「byte-exact 一致」→「field-type-sequence match」。`method_getTypeEncoding`
+  は field 型並びを吐くが offset / packing / sizeof は吐かないため、上記検証だけでは
+  「PDF 記述と明白に食い違う不一致 (8 → 45 bytes 等) の safety net」までしか保証できない
+- **自前仮説の固定**: `SDKGateway.h` 末尾に `_Static_assert(sizeof(...)==N)` と
+  `_Static_assert(offsetof(..., name)==N)` を追加。SDK 側との一致証明ではなく、
+  未来の変更で自前 struct 順が変わったら compile-time で弾く regression detector
+- **`_pad*` → `_unknown*` 改名**: 「SDK が無視する」という誤った保証を含む名前を避ける
+- **`__unsafe_unretained NSString *` の即時 `%@` を pointer log に変更**: dangling の
+  リスクがあるため、SDK の retain/autorelease 契約が確定するまで dereference しない
+- **`_IFDArray` を canonical typedef 化**: `SgmAdjustmentConfig` は typedef 別名に
+- **`sgm_ConfigAPI` の cleanup を成否共通化**: 失敗時に partial alloc された領域も解放
+- **Spike 2 / 2b の成功判定を厳しく AND**: `respCode == 0x2001` + データフェーズ長 +
+  container type を全部見る (rc==0 だけの偽陽性を防ぐ)
+- **Spike 2b の commandType を環境変数化**: `SIGMA_SPIKE2B_CTYPE` で 0/1/2 を切替可能に
+  (SampleAPP LLDB 採取まで「探索モード」であることを log でも明示)
+- **LLDB script の `$rdx / $rcx` ずれ修正**: breakpoint 2 で PassThrough を dump する
+  register が 1 個ずれていた (camera を dump していた)。arm64 register 対応表もヘッダに追記
+
+**未解決 (次セッションのクリティカルパス)**:
+- Spike 4/5 で SampleAPP から `PassThrough の実 offset` / `commandType` / `PTP_Command vs
+  PTP_ReceiveData の使い分け` を採取
+- Spike 2 / 2b を同一 runloop・thread 条件で走らせるように NSApp init 順序を揃える
 
 `./helper/build/sigma-tether-helper --abi-dump` の exit code = 0 で CI-friendly な
 regression detector として機能する (不一致が 1 件でも出れば exit=1)。フルダンプは

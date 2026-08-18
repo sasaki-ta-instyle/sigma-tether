@@ -289,14 +289,19 @@ static NSData * DownloadPicture(ICCameraDevice *cam, UInt8 imageID) {
     // NOTE: SDK ABI が PDF と食い違うと発覚 (Spike 1)。旧 DataLength/FileCount は
     // 存在しない。実際は 2 セットの (UInt8 flag + UInt16×3 + NSString + UInt32×2)。
     // 意味未確定なので生バイトをそのまま dump し、Wave 1b 突破後に field 名を確定させる。
+    //
+    // Codex High 6: `_name0` / `_name1` は SDK が書き込んだ NSString ポインタだが、
+    // 所有権契約が未確定 (dangling の可能性)。%@ で dereference するとクラッシュしうる。
+    // まずは pointer 値のみ dump し、SampleAPP LLDB で retain/autorelease 挙動を確認して
+    // から `%@` でのログや copy に移す。
     LogInfo(@"PictFileInfo2: raw=%@",
             [NSData dataWithBytes:&info length:sizeof(info)]);
-    LogInfo(@"PictFileInfo2 [set0]: flag=%u u16=(%u,%u,%u) name=%@ u32=(%u,%u)",
+    LogInfo(@"PictFileInfo2 [set0]: flag=%u u16=(%u,%u,%u) name_ptr=%p u32=(%u,%u)",
             info._flag0, info._u16_0a, info._u16_0b, info._u16_0c,
-            info._name0, info._u32_0a, info._u32_0b);
-    LogInfo(@"PictFileInfo2 [set1]: u16=(%u,%u,%u) name=%@ u32=(%u,%u)",
+            (__bridge void *)info._name0, info._u32_0a, info._u32_0b);
+    LogInfo(@"PictFileInfo2 [set1]: u16=(%u,%u,%u) name_ptr=%p u32=(%u,%u)",
             info._u16_1a, info._u16_1b, info._u16_1c,
-            info._name1, info._u32_1a, info._u32_1b);
+            (__bridge void *)info._name1, info._u32_1a, info._u32_1b);
 
     const UInt32 storeAddress = imageID;
     const UInt32 chunkSize    = 1024 * 1024;
@@ -365,20 +370,21 @@ static int RunCaptureSequence(ICCameraDevice *cam) {
                             cameraHandle:cam];
     LogSdk(@"sgm_ConfigAPI", rc);
     TraceLastPTP(@"sgm_ConfigAPI");
-    if (!SgmSucceeded(rc)) return 3;
-    LogInfo(@"APIConfig: dataLength=%u directoryCount=%u", apiConfig.dataLength, apiConfig.directoryCount);
-
-    // SDK が alloc した directoryEntry 領域を明示解放 (解放しないとリーク)。
-    // 現状 helper は 1 セッション 1 撮影で exit するので実害は小さいが、
-    // 将来的に長時間 tether するとき (Wave 4 以降) に効く。
+    // Codex Medium 8: 成否にかかわらず SDK が directoryEntry を alloc していれば
+    // 解放する (失敗時にも部分的に設定されている可能性がある)。
+    BOOL configOk = SgmSucceeded(rc);
+    if (configOk) {
+        LogInfo(@"APIConfig: dataLength=%u directoryCount=%u",
+                apiConfig.dataLength, apiConfig.directoryCount);
+    }
     if (apiConfig.directoryEntry != NULL) {
         int rfree = [DeviceInterface sgm_FreeArrayMemory:&apiConfig];
         LogSdk(@"sgm_FreeArrayMemory (ConfigAPI)", rfree);
-        // 解放後は directoryEntry を NULL に (二重解放防止)
         apiConfig.directoryEntry = NULL;
         apiConfig.dataLength = 0;
         apiConfig.directoryCount = 0;
     }
+    if (!configOk) return 3;
 
     // ImageQuality = DNG (0x10) を書き込む
     SgmDataGroup2 dg2 = {};
@@ -484,13 +490,27 @@ static NSData * BuildPTPCommandBlock(UInt16 opCode, NSArray<NSNumber *> *params)
 }
 
 // Spike 2b: SDK 内部の PTP_Command 経由で GetDeviceInfo (0x1001) を送る対照。
-// Spike 2 (ICC 直接) と組み合わせて 4 象限で切り分ける:
-//   Spike 2 OK / Spike 2b OK  → ICC も SDK 内部経路も生きている → sgm_* 層の問題
-//   Spike 2 OK / Spike 2b NG  → SDK 内部経路が壊れている (PTP_Command params 誤り等)
-//   Spike 2 NG / Spike 2b OK  → 想定外 (先に ICC が動かないと SDK も動かないはず)
-//   Spike 2 NG / Spike 2b NG  → ICC/TCC/USB 層の問題 (Developer ID 署名や TCC 権限)
+//
+// **重要な留保 (Codex Critical 2 / High 3)**:
+// - `commandType` の実値と PassThrough の各 field の意味・offset は未確定
+// - SampleAPP LLDB 採取 (Spike 4/5) 完了までは診断情報として弱い
+// - GetDeviceInfo は本来 ReceiveData 経路なので、`PTP_Command` (分岐用抽象呼び出し?) に
+//   `commandType=0` を渡す設計そのものが正しくない可能性がある
+// - また Spike 2 (Apple ICC delegate 非同期) と本試験 (SDK 内部同期) は runloop /
+//   thread 条件も違うため、単純な 2×2 象限判定はできない
+//
+// 一時的な使い方: 「まず PTP_Command を叩いたら respCode が返るか」の探索用。
+// commandType は環境変数 SIGMA_SPIKE2B_CTYPE で 0/1/2 を切り替え可能。
 static int RunSpike2bPTPCommand(ICCameraDevice *cam) {
-    LogInfo(@"[spike2b] SDK 内部 PTP_Command 経由で GetDeviceInfo (0x1001) を送信");
+    LogInfo(@"[spike2b] SDK 内部 PTP_Command 経由で GetDeviceInfo (0x1001) を送信 (探索モード)");
+
+    // commandType を環境変数で切り替え (デフォルト 0)。Spike 4 で SampleAPP から
+    // 実値を採取するまでは「探索」であることを明示する。
+    int commandType = 0;
+    const char *ctEnv = getenv("SIGMA_SPIKE2B_CTYPE");
+    if (ctEnv) commandType = atoi(ctEnv);
+    LogInfo(@"[spike2b] commandType=%d (SIGMA_SPIKE2B_CTYPE で上書き可能 / 0/1/2 を試す想定)",
+            commandType);
 
     // DeviceInterface のシングルトンを取得
     DeviceInterface *di = [DeviceInterface sgm_GetActiveDriverInstance];
@@ -502,24 +522,40 @@ static int RunSpike2bPTPCommand(ICCameraDevice *cam) {
         LogErr(@"[spike2b] DeviceInterface instance が取れない");
         return 1;
     }
-    LogInfo(@"[spike2b] DeviceInterface instance: %@", di);
+    LogInfo(@"[spike2b] DeviceInterface instance: %p (%@)", di, [di class]);
 
     // PassThrough を初期化して 0x1001 を送る
     SgmPassThrough pt = {};
     pt.opCode = 0x1001;
     LogInfo(@"[spike2b] PassThrough size=%zu opCode=0x%04x", sizeof(pt), pt.opCode);
 
-    // commandType = 0 (plain command in-only) を仮定。実値は Spike 4 で確定させる。
-    int rc = [di PTP_Command:cam param:&pt commandType:0 retry:1];
-    LogInfo(@"[spike2b] PTP_Command rc=%d respCode=0x%04x", rc, pt.respCode);
-    if (pt.payloadSize > 0) {
-        LogInfo(@"[spike2b] payload received: %llu bytes", (unsigned long long)pt.payloadSize);
-    }
-    if (pt.respCode == 0x2001 || rc == 0) {
-        LogInfo(@"[spike2b] ✅ 応答受信 (respCode=0x2001)");
+    // 呼び出し前後の生バイトを dump (offset 検証のため、次セッションで LLDB と突合)
+    LogInfo(@"[spike2b] PassThrough (before): %@",
+            [NSData dataWithBytes:&pt length:sizeof(pt)]);
+
+    int rc = [di PTP_Command:cam param:&pt commandType:commandType retry:1];
+
+    LogInfo(@"[spike2b] PTP_Command returned rc=%d", rc);
+    LogInfo(@"[spike2b] PassThrough (after): %@",
+            [NSData dataWithBytes:&pt length:sizeof(pt)]);
+    LogInfo(@"[spike2b] parsed: respCode=0x%04x payloadSize=%llu payloadPtr=%p",
+            pt.respCode, (unsigned long long)pt.payloadSize, pt.payload);
+
+    // Codex High 4: 成功判定は AND 条件で厳しく取る。
+    // rc==0 は「dispatch 受付成功」の可能性があり、PTP 応答成功とは限らない。
+    BOOL rcOk       = SgmSucceeded(rc);
+    BOOL respOk     = (pt.respCode == 0x2001);
+    BOOL payloadOk  = (pt.payloadSize > 0 && pt.payload != NULL);
+    if (rcOk && respOk && payloadOk) {
+        LogInfo(@"[spike2b] ✅ PTP GetDeviceInfo 成功 (rc=%d respCode=0x2001 payload=%llu bytes)",
+                rc, (unsigned long long)pt.payloadSize);
         return 0;
     }
-    LogErr(@"[spike2b] ❌ 応答なし or エラー (rc=%d respCode=0x%04x)", rc, pt.respCode);
+    LogErr(@"[spike2b] ❌ 成功判定不成立: rc=%d rcOk=%d respOk=%d payloadOk=%d",
+           rc, rcOk, respOk, payloadOk);
+    LogErr(@"[spike2b]    → commandType=%d が正しいか、PTP_Command と PTP_ReceiveData の"
+           @" どちらを使うべきかを Spike 4 で SampleAPP から確認する必要あり",
+           commandType);
     return 2;
 }
 
@@ -550,18 +586,38 @@ static int RunSpike2GetDeviceInfo(ICCameraDevice *cam) {
         LogErr(@"[spike2] error: %@", delegate.error);
         return 2;
     }
-    LogInfo(@"[spike2] ✅ 応答受信 response=%lu bytes inData=%lu bytes",
+    LogInfo(@"[spike2] callback 到達 response=%lu bytes inData=%lu bytes (成功判定はまだ)",
             (unsigned long)delegate.responseCmd.length, (unsigned long)delegate.inData.length);
 
-    // response block 解析
-    if (delegate.responseCmd.length >= 8) {
-        const UInt8 *b = (const UInt8 *)delegate.responseCmd.bytes;
-        UInt32 len = b[0] | (b[1]<<8) | (b[2]<<16) | (b[3]<<24);
-        UInt16 type = b[4] | (b[5]<<8);
-        UInt16 code = b[6] | (b[7]<<8);
-        LogInfo(@"[spike2] response: len=%u type=0x%04x code=0x%04x", len, type, code);
-        // code 0x2001 = OK
+    // Codex High 4: rc==0 だけでは足りない。以下を AND 条件にする。
+    //   1. responseCmd 長 >= 8 (container header 分)
+    //   2. type == 3 (Response Block Container)
+    //   3. code == 0x2001 (OK)
+    //   4. GetDeviceInfo のデータフェーズ (inData) が存在
+    if (delegate.responseCmd.length < 8) {
+        LogErr(@"[spike2] ❌ response container が短すぎる (len=%lu)",
+               (unsigned long)delegate.responseCmd.length);
+        return 3;
     }
+    const UInt8 *b = (const UInt8 *)delegate.responseCmd.bytes;
+    UInt32 len  = b[0] | (b[1]<<8) | (b[2]<<16) | (b[3]<<24);
+    UInt16 type = b[4] | (b[5]<<8);
+    UInt16 code = b[6] | (b[7]<<8);
+    LogInfo(@"[spike2] response: len=%u type=0x%04x code=0x%04x", len, type, code);
+    if (type != 3) {
+        LogErr(@"[spike2] ❌ response type が 3 (Response) でない: 0x%04x", type);
+        return 4;
+    }
+    if (code != 0x2001) {
+        LogErr(@"[spike2] ❌ response code が OK でない: 0x%04x", code);
+        return 5;
+    }
+    if (delegate.inData.length == 0) {
+        LogErr(@"[spike2] ❌ GetDeviceInfo のデータフェーズが無い");
+        return 6;
+    }
+    LogInfo(@"[spike2] ✅ PTP GetDeviceInfo 成功 (type=Response code=0x2001 dataset=%lu bytes)",
+            (unsigned long)delegate.inData.length);
     return 0;
 }
 
@@ -672,13 +728,20 @@ static void DumpOurEncodingExpectations(void) {
 }
 
 // --------------------------------------------------------------------------
-// Spike 1 修正後の byte-exact 一致検証
+// Spike 1 修正後の field-type-sequence 一致検証
 //
-// SDK 側 method_getTypeEncoding から struct 引数の encoding を取り出し、
-// 我々の @encode(struct*) の encoding と field 部だけを比較する。
-// SDK: `^{_SgmXxx=CCC}` / 我々: `^{?=CCC}` → 内側 `CCC` が一致すれば MATCH。
+// **注意 (Codex Critical 1)**: これは "byte-exact" 一致ではない。
+// `method_getTypeEncoding` は field の型並び (`CSSS@II...`) だけを吐き、
+// 実 offset・struct 全体の sizeof・alignment/packing は吐かない。
+// つまり ここでの MATCH は「型の並び順が同じ」までしか保証しない。
 //
-// 4 struct すべて MATCH でなければ exit code = 1 を返して CI で検知可能にする。
+// 特に:
+//   - 同じ型が連続する encoding (`CCC` 等) は追加バイトの位置を区別できない
+//   - packed と通常 alignment の struct は同じ encoding になる
+//
+// **byte-exact 一致の証明**は SDK バイナリの逆アセンブルと SampleAPP の LLDB 採取
+// (Spike 4/5) が必要。ここは「PDF 記述との明白な不一致 (SgmPictureFileInfoData の
+// 8 vs 45 bytes 等) を機械的に検知する」レベルの safety net として使う。
 // --------------------------------------------------------------------------
 
 // 与えられた encoding 文字列 `s` の中で、最初の `{` から対応する `}` までの
@@ -749,7 +812,7 @@ static void CompareStruct(const char *label,
 }
 
 static int VerifyStructAbiMatches(void) {
-    printf("\n# --- byte-exact ABI 一致検証 (Spike 1 修正後) ---\n\n");
+    printf("\n# --- field-type-sequence ABI 一致検証 (Spike 1 修正後 / packing・offset は未検証) ---\n\n");
     g_abiMismatchCount = 0;
 
     // SgmSnapState: 引数 1 番目 (sgm_SnapCommand:cameraHandle:)
