@@ -559,6 +559,95 @@ static int RunSpike2bPTPCommand(ICCameraDevice *cam) {
     return 2;
 }
 
+// Spike 2c: SDK 内部の PTP_ReceiveData:param:retry: を直接叩く。
+//
+// Spike 4 (SampleAPP LLDB attach) で発覚:
+//   - SampleAPP の sgm_ConfigAPI は内部で PTP_ReceiveData も PTP_Command も呼ぶ
+//   - どちらも hit count = 1 で確認済み
+//   - PTP_Command が dispatcher (commandType で分岐?)、PTP_ReceiveData が実 receive
+// なので PTP_ReceiveData を直接叩けば PTP_Command dispatcher の commandType 迷いを
+// 回避できる (GetDeviceInfo は本来 Receive 操作)。
+//
+// また lock4Icc を取得してから呼ぶバリエーションも同梱 (SIGMA_SPIKE2C_LOCK=1)。
+static int RunSpike2cReceiveData(ICCameraDevice *cam) {
+    LogInfo(@"[spike2c] SDK 内部 PTP_ReceiveData 経由で GetDeviceInfo (0x1001) を送信");
+
+    DeviceInterface *di = [DeviceInterface sgm_GetActiveDriverInstance];
+    if (!di) {
+        LogInfo(@"[spike2c] sgm_GetActiveDriverInstance nil → getInstance");
+        di = [DeviceInterface getInstance];
+    }
+    if (!di) {
+        LogErr(@"[spike2c] DeviceInterface instance 取得失敗");
+        return 1;
+    }
+    LogInfo(@"[spike2c] DeviceInterface instance: %p (%@)", di, [di class]);
+
+    // Optional: lock4Icc を取ってから発行するモード
+    id lockToken = nil;
+    if (getenv("SIGMA_SPIKE2C_LOCK")) {
+        LogInfo(@"[spike2c] lock4Icc を取得します (SIGMA_SPIKE2C_LOCK set)");
+        lockToken = [di performSelector:@selector(lock4Icc)];
+        LogInfo(@"[spike2c] lock4Icc → %p", lockToken);
+    }
+
+    SgmPassThrough pt = {};
+    pt.opCode = 0x1001;
+    LogInfo(@"[spike2c] PassThrough size=%zu opCode=0x%04x", sizeof(pt), pt.opCode);
+    LogInfo(@"[spike2c] PassThrough (before): %@",
+            [NSData dataWithBytes:&pt length:sizeof(pt)]);
+
+    int rc = [di PTP_ReceiveData:cam param:&pt retry:1];
+
+    LogInfo(@"[spike2c] PTP_ReceiveData returned rc=%d", rc);
+    LogInfo(@"[spike2c] PassThrough (after): %@",
+            [NSData dataWithBytes:&pt length:sizeof(pt)]);
+    LogInfo(@"[spike2c] parsed: respCode=0x%04x payloadSize=%llu payloadPtr=%p",
+            pt.respCode, (unsigned long long)pt.payloadSize, pt.payload);
+
+    BOOL rcOk       = SgmSucceeded(rc);
+    BOOL respOk     = (pt.respCode == 0x2001);
+    BOOL payloadOk  = (pt.payloadSize > 0 && pt.payload != NULL);
+    int result = (rcOk && respOk && payloadOk) ? 0 : 2;
+    if (result == 0) {
+        LogInfo(@"[spike2c] ✅ PTP GetDeviceInfo 成功 (rc=%d respCode=0x2001 payload=%llu bytes)",
+                rc, (unsigned long long)pt.payloadSize);
+    } else {
+        LogErr(@"[spike2c] ❌ 成功判定不成立: rc=%d rcOk=%d respOk=%d payloadOk=%d",
+               rc, rcOk, respOk, payloadOk);
+    }
+    (void)lockToken; // ARC 保持のみ
+    return result;
+}
+
+// Spike 2d: 高レベル sgm_ConfigAPI を、SampleAPP と同じ形で "sgm_CamOpen 経由"
+// で叩いた場合の挙動確認。default helper は sgm_CamOpen を skip しているが、
+// SampleAPP LLDB 採取から SDK 内部 state 準備に何か抜けている可能性が示唆された
+// (2026-08-18 セッション終端)。
+static int RunSpike2dConfigAPIViaCamOpen(ICCameraDevice *cam) {
+    LogInfo(@"[spike2d] SampleAPP と同順序: sgm_CamOpen → sgm_ConfigAPI");
+
+    [DeviceInterface sgm_CamOpen:cam];
+    LogInfo(@"[spike2d] sgm_CamOpen 呼び出し完了");
+
+    SgmAdjustmentConfig apiConfig = { .dataLength = 0, .directoryCount = 0, .directoryEntry = NULL };
+    int rc = [sgm_ConfigAPI sgm_ConfigAPI:&apiConfig
+                          AdjustmentMode:0
+                            cameraHandle:cam];
+    LogInfo(@"[spike2d] sgm_ConfigAPI rc=%d", rc);
+    if (SgmSucceeded(rc)) {
+        LogInfo(@"[spike2d] ✅ ConfigAPI 成功 dataLength=%u directoryCount=%u",
+                apiConfig.dataLength, apiConfig.directoryCount);
+    } else {
+        LogErr(@"[spike2d] ❌ ConfigAPI 失敗 rc=%d", rc);
+    }
+    if (apiConfig.directoryEntry != NULL) {
+        [DeviceInterface sgm_FreeArrayMemory:&apiConfig];
+    }
+    [DeviceInterface sgm_CamClose:cam];
+    return SgmSucceeded(rc) ? 0 : 3;
+}
+
 static int RunSpike2GetDeviceInfo(ICCameraDevice *cam) {
     LogInfo(@"[spike2] 標準 PTP GetDeviceInfo (0x1001) を直接送信");
     Spike2Delegate *delegate = [Spike2Delegate new];
@@ -858,6 +947,8 @@ static int VerifyStructAbiMatches(void) {
 // spike モード判定用のグローバル
 static BOOL g_spike2Mode  = NO;   // 標準 PTP 0x1001 を ICC 直接送信
 static BOOL g_spike2bMode = NO;   // 標準 PTP 0x1001 を SDK 内部 PTP_Command 経由で送信
+static BOOL g_spike2cMode = NO;   // 標準 PTP 0x1001 を SDK 内部 PTP_ReceiveData 経由で送信
+static BOOL g_spike2dMode = NO;   // sgm_CamOpen → sgm_ConfigAPI (SampleAPP と同順序)
 static BOOL g_spike3Mode  = NO;   // main queue 自己待ち対照試験 (専用 worker から発行)
 
 int main(int argc, const char * argv[]) {
@@ -874,6 +965,12 @@ int main(int argc, const char * argv[]) {
         }
         if (argc >= 2 && strcmp(argv[1], "--spike2b") == 0) {
             g_spike2bMode = YES;
+        }
+        if (argc >= 2 && strcmp(argv[1], "--spike2c") == 0) {
+            g_spike2cMode = YES;
+        }
+        if (argc >= 2 && strcmp(argv[1], "--spike2d") == 0) {
+            g_spike2dMode = YES;
         }
         if (argc >= 2 && strcmp(argv[1], "--spike3") == 0) {
             g_spike3Mode = YES;
@@ -938,6 +1035,38 @@ int main(int argc, const char * argv[]) {
         // Spike 2b モード: SDK 内部 PTP_Command 経由で 0x1001 を送信
         if (g_spike2bMode) {
             int spikeRc = RunSpike2bPTPCommand(cam);
+            [cam requestCloseSession];
+            [browser stop];
+            [DeviceInterface sgm_terminateSDK];
+            return spikeRc;
+        }
+
+        // Spike 2c モード: SDK 内部 PTP_ReceiveData 経由で 0x1001 を送信
+        if (g_spike2cMode) {
+            int spikeRc = RunSpike2cReceiveData(cam);
+            [cam requestCloseSession];
+            [browser stop];
+            [DeviceInterface sgm_terminateSDK];
+            return spikeRc;
+        }
+
+        // Spike 2d モード: sgm_CamOpen → sgm_ConfigAPI (SampleAPP 同順序)
+        if (g_spike2dMode) {
+            // NSApp が要る可能性を考慮して最低限セットアップ
+            [NSApplication sharedApplication];
+            [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+            __block int spikeRc = -1;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                spikeRc = RunSpike2dConfigAPIViaCamOpen(cam);
+                [NSApp stop:nil];
+                NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                                  location:NSMakePoint(0, 0)
+                                             modifierFlags:0 timestamp:0
+                                              windowNumber:0 context:nil
+                                                   subtype:0 data1:0 data2:0];
+                [NSApp postEvent:wake atStart:YES];
+            });
+            [NSApp run];
             [cam requestCloseSession];
             [browser stop];
             [DeviceInterface sgm_terminateSDK];

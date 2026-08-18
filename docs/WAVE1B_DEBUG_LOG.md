@@ -44,6 +44,63 @@ fpL 実機接続で helper を走らせ、**セッション Open + content catal
 
 Codex の指摘: Wave 1b の壁を「Developer ID 署名不足」と見た仮説は**弱い**（PTP 送信処理まで到達しているのが観測できているため）。以下 5 項目を先に消化する。
 
+### Wave 1b 実機検証結果 (2026-08-18 セッション後半)
+
+fpL 接続 + `arch -x86_64 lldb -p <SampleAPP-PID>` (get-task-allow 再署名) で LLDB attach、
+Spike 2/2b/2c/2d/2f を実施した結果、**主犯仮説がほぼ確定**した:
+
+| 検証項目 | 結果 |
+|---|---|
+| **Spike 2** (Apple ICC 直接 `requestSendPTPCommand` 0x1001) | ✅ **成功** (281 bytes response, callback on main thread) |
+| **Spike 2b** (SDK 内部 `PTP_Command:param:commandType:retry:` for 0x1001, commandType=0/1/2) | ❌ 全 3 パターン rc=4097 (SgmResultSystemError) |
+| **Spike 2c** (SDK 内部 `PTP_ReceiveData:param:retry:` for 0x1001) | ❌ rc=4097 |
+| **Spike 2d** (`sgm_CamOpen` → `sgm_ConfigAPI` = SampleAPP 同順序) | ❌ rc=4097 |
+| **Spike 2f** (bundle ID を `jp.co.sigma-inc.SampleAPP` に変更) | ❌ rc=4097 |
+| **Spike 4** (SampleAPP LLDB attach) | ⚠️ 部分成功 |
+| **同じ fpL に SampleAPP** で `sgm_ConfigAPI` | ✅ **成功** (0x9035 ResCode 0x2001, 76 bytes) |
+
+Spike 4 LLDB での hit カウント (SampleAPP 側):
+- `+[sgm_GetCamStatus2 sgm_GetCamStatus2:...]` hit=0 (SampleAPP は warm-up 呼ばない)
+- **`-[DeviceInterface PTP_Command:param:commandType:retry:]` hit=1** ← SDK 内部で使う
+- **`-[DeviceInterface PTP_ReceiveData:param:retry:]` hit=1** ← SDK 内部で使う
+- `-[DeviceInterface PTP_SendCommand:param:retry:]` hit=0
+- `-[DeviceInterface didSendPTPCommand:...]` hit=0
+- `-[ICCameraDevice requestSendPTPCommand:...]` hit=0
+
+### 主犯仮説の絞り込み
+
+- ❌ **selector 選択** (PTP_Command vs PTP_ReceiveData) → どちらでも失敗
+- ❌ **commandType 値** (0/1/2) → 全部失敗
+- ❌ **sgm_CamOpen 順序** → 有無どちらでも失敗
+- ❌ **bundle identifier** → SampleAPP と同じにしても失敗
+- ✅ **Apple ICC 直接** = ICC/USB/Rosetta/カメラ側 は健全
+- 🎯 **残る主犯候補 (次セッション着手順)**:
+  1. **AppKit 初期化順序**: SampleAPP は NSApplicationMain + Nib (MainMenu.xib) 経由、
+     我々は `[NSApplication sharedApplication]` を手動 → SDK が nib-driven runloop 前提の
+     可能性 (`[NSApp finishLaunching]` 明示呼び, `LSUIElement` 削除, MainMenu.xib 化 が候補)
+  2. **署名層** (Developer ID / notarization / hardened runtime): SIGMA は Developer ID
+     Application `YPD8HGHUQZ` で signed + notarized。ad-hoc 署名との差が SDK 内部の
+     PTP callback dispatch 判定に影響している可能性
+
+### Info.plist の差分参照
+
+SampleAPP と我々の Info.plist を突合した結果 (次セッションで真似できる範囲):
+- SampleAPP: `NSMainNibFile = MainMenu` (我々は無し)
+- SampleAPP: `LSUIElement` 無し (Dock 表示アプリ)、我々は `LSUIElement = true` (Accessory)
+- SampleAPP: `NSHumanReadableCopyright = ©SIGMA Corporation`
+- SampleAPP: `NSPrincipalClass = NSApplication` (同一)
+- SampleAPP: `Team ID YPD8HGHUQZ (SIGMA), Notarized, Runtime v10.15.0, hardened runtime`
+
+### 次セッションのクリティカルパス
+
+1. Spike 2g: `LSUIElement` を削除、`[NSApp finishLaunching]` を明示呼び + `[NSApp activate]`
+   → NSApplicationMain 相当の初期化順序を手動で完成させる
+2. Spike 2h: MainMenu.xib + AppDelegate.m を追加、`main.m` を `NSApplicationMain(argc, argv)` に
+   置き換え (Nib driven の完全再現)
+3. どちらもダメなら **署名層** の実験へ (Apple Developer 加入 or SIGMA サポート問い合わせ)
+
+--- 
+
 1. ✅ **Objective-C ABI 一致検証** (2026-08-18 完了)
    `--abi-dump` サブコマンドで SDK 実 selector 署名を `method_getTypeEncoding` で全部
    ダンプ。**4 件の struct 不一致を発見** (`SgmPictureFileInfoData` 8→45 bytes が 🔴 BLOCKER、
