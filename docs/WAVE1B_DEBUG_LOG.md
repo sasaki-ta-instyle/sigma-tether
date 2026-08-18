@@ -44,6 +44,44 @@ fpL 実機接続で helper を走らせ、**セッション Open + content catal
 
 Codex の指摘: Wave 1b の壁を「Developer ID 署名不足」と見た仮説は**弱い**（PTP 送信処理まで到達しているのが観測できているため）。以下 5 項目を先に消化する。
 
+### Archived 2026-08-19
+
+Wave 1b 突破が「SIGMA SDK 独自 PTP transport の壁」を越える必要がある大きめの投資 (半日〜数日) と見積もれたため、いったんアーカイブ。次回再開時は下記「Apple ICC 直接実装への転換候補」から着手する。
+
+### Spike 2g / 2i 追加検証 (2026-08-19 セッション、否定的結果)
+
+- **Spike 2g**: `Info.plist` から `LSUIElement` を削除 + `NSApplicationActivationPolicyRegular` +
+  `[NSApp finishLaunching]` + `[NSApp activateIgnoringOtherApps:YES]` を明示呼び
+  → 結果: `cmd=0x902c retry...1 times` 同じ失敗パターン
+- **Spike 2i**: `open --stdout ... helper.app` で Launch Services 経由起動
+  → 結果: 同じく `cmd=0x902c retry...1 times`
+- **結論**: AppKit 初期化順序 / activation / Launch Services 起動 のいずれも主犯ではない
+
+### Apple ICC 直接実装への転換候補 (次回再開時に着手)
+
+Spike 4 の hit count で **SampleAPP は `-[ICCameraDevice requestSendPTPCommand:...]` を hit=0**
+だった (=SDK は Apple ICC を経由せず、IOKit / IOUSBHost に直接繋いでいる) ことが判明。
+署名層以外に「SDK は自前 USB transport で計装している」構造の壁があり、helper 側で
+どれだけ NSApp を整えても SDK 経由では応答が来ない可能性が高い。
+
+**方針転換案**:
+
+- SDK 依存を捨て、**Apple ICC を transport にして PTP を自前で組む** (Spike 2 の
+  `requestSendPTPCommand` 0x1001 で 281 bytes 受信成功実績あり)
+- SIGMA vendor OperationCode (0x9035 ConfigAPI / 0x902c GetCamStatus2 / 0x901D SnapCommand / …)
+  も Apple ICC で送れる (PTP は透過、ベンダー拡張は data phase だけ)
+- SDK バイナリの `PassThrough` struct (80 bytes) の意味は Spike 1 で判明済み
+- 署名 / notarization / bundle 識別 の壁が同時に消える
+
+**必要な実装**:
+
+1. `sgm_ConfigAPI` 相当を Apple ICC で組む: 0x9035 を送って IFD Array 受信 + parse
+2. `sgm_GetCamStatus2` 相当: 0x902c を送って CamStatus 受信 + parse
+3. `sgm_SnapCommand` / `sgm_GetCamCaptStatus` / `sgm_GetPictFileInfo2` / `sgm_GetBigPartialPictFile` も同様
+4. PTP コンテナビルダー (Spike 2 の `BuildPTPCommandBlock`) を拡張
+
+--- 
+
 ### Wave 1b 実機検証結果 (2026-08-18 セッション後半)
 
 fpL 接続 + `arch -x86_64 lldb -p <SampleAPP-PID>` (get-task-allow 再署名) で LLDB attach、

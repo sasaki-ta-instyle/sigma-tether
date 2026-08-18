@@ -10,7 +10,9 @@
     <key>CFBundleShortVersionString</key><string>0.1</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
-    <key>LSUIElement</key><true/>
+    <!-- Spike 2g (2026-08-19): SIGMA SDK が「Dock 表示アプリ + finishLaunching 完了」
+         を前提に PTP callback を dispatch する仮説の検証のため、LSUIElement は削除。
+         (SampleAPP は LSUIElement 無し = Dock 表示アプリ) -->
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSCameraUsageDescription</key><string>SIGMA fp / fpL のテザー撮影のためカメラアクセスを使用します。</string>
     <key>SGM_DEBUG</key><true/>

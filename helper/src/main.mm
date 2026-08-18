@@ -1078,8 +1078,23 @@ int main(int argc, const char * argv[]) {
         // ここで初めて NSApplication を用意し、NSApp.run で本格的な Cocoa
         // event loop に入る。sgm_ConfigAPI 等の SDK 呼び出しは requestSendPTPCommand
         // のコールバックがメインスレッドで dispatch されるのに依存しているため。
+        //
+        // Spike 2g (2026-08-19): SampleAPP は NSApplicationMain(argc, argv) 経由で
+        // 起動するため、NSApp の初期化状態が "finishLaunching 済 + activated" の
+        // 完全体になっている。我々は sharedApplication だけを呼んでいるため、
+        // finishLaunching / didFinishLaunching notification / active 状態が抜けている。
+        // SDK が active window + finishLaunching 完了に依存して PTP callback を
+        // dispatch する可能性を排除するため、以下を明示的にセットアップ:
+        //   1. Regular activation policy (Dock 表示アプリ扱い、LSUIElement も削除済み)
+        //   2. finishLaunching を明示呼び (didFinishLaunching notification が飛ぶ)
+        //   3. activateIgnoringOtherApps で active 状態に
         [NSApplication sharedApplication];
-        [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [NSApp finishLaunching];
+        [NSApp activateIgnoringOtherApps:YES];
+        LogInfo(@"[spike2g] NSApp finishLaunching + activateIgnoringOtherApps 完了 "
+                @"(policy=Regular, LSUIElement 削除, isActive=%d isRunning=%d)",
+                (int)[NSApp isActive], (int)[NSApp isRunning]);
 
         // Spike 3 (--spike3): 専用 worker queue から SDK 呼び出しを発行し、
         //   main queue は完全に runloop pump に専念する対照試験。
