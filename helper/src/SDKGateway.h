@@ -191,6 +191,84 @@ typedef struct __attribute__((packed)) {
     void * _Nullable directoryEntry;   // SgmDirectoryEntry* (詳細後日)
 } SgmAdjustmentConfig;
 
+#pragma mark - PassThrough (SDK 内部 PTP コマンド構造体)
+
+// Spike 1 で ABI ダンプから発掘した SDK 内部の PTP コマンド構造体。
+// `-[DeviceInterface PTP_Command:param:commandType:retry:]` の第 2 引数がこれ。
+// ABI dump: `{PassThrough=S[5I]SII@S[5I]SQ^v}`
+//
+//   UInt16 opCode              PTP OperationCode
+//   UInt32 cmdParams[5]        PTP コマンド params (最大 5)
+//   UInt16 _pad0
+//   UInt32 dataLength          データフェーズ長 (推定)
+//   UInt32 transactionID       (推定, SDK が採番)
+//   id     data                データフェーズの NSData (SendData 用)
+//   UInt16 respCode            PTP ResponseCode (0x2001 = OK)
+//   UInt32 respParams[5]       PTP 応答 params (最大 5)
+//   UInt16 _pad1
+//   UInt64 payloadSize         受信データサイズ (推定)
+//   void*  payload             受信データポインタ (SDK が alloc)
+//
+// packed 前提の内部レイアウト。field 名は推定なので実機実験で確定させる。
+// SDK の PTP_Command 系はこの構造体経由で全 PTP コマンドを送るため、
+// sgm_* 層をバイパスして直接コマンド発行できる (Spike 2b 用途)。
+typedef struct __attribute__((packed)) {
+    UInt16 opCode;
+    UInt32 cmdParams[5];
+    UInt16 _pad0;
+    UInt32 dataLength;
+    UInt32 transactionID;
+    __unsafe_unretained id data;
+    UInt16 respCode;
+    UInt32 respParams[5];
+    UInt16 _pad1;
+    UInt64 payloadSize;
+    void * _Nullable payload;
+} SgmPassThrough;
+
+// PTP コマンドタイプ (PTP_Command の 3rd 引数): 推定
+//   0 = plain command (in-only)、1 = SendData、2 = ReceiveData
+// ABI dump に `PTP_SendCommand: / PTP_ReceiveData: / PTP_SendData:` の別 selector が
+// あるので、PTP_Command 自体は分岐用の抽象呼び出し。実値は Spike 4 で確定する。
+
+// _IFDArray (== SgmAdjustmentConfig) の directoryEntry 解放。
+// SDK が alloc した領域は sgm_FreeArrayMemory: を呼ばないとリークする。
+// ABI dump: `+sgm_FreeArrayMemory: i24@0:8^{_IFDArray=II^{_SgmDirectoryEntry}}16`
+// (@interface DeviceInterface は上で既に開いているが、SgmAdjustmentConfig 型を
+// 参照するため型定義の後にカテゴリで追加)
+@interface DeviceInterface (Memory)
++ (int)sgm_FreeArrayMemory:(SgmAdjustmentConfig * _Nonnull)inArray;
+// SDK が管理する DeviceInterface のシングルトン取得 (ABI dump 由来)。
++ (instancetype _Nullable)sgm_GetActiveDriverInstance;
++ (instancetype _Nullable)getInstance;
+@end
+
+// DeviceInterface instance methods: SDK 内部 PTP コマンド送信の抽象呼び出し。
+// ABI dump:
+//   -PTP_Command:param:commandType:      i36@0:8@16^{PassThrough=...}24i32
+//   -PTP_Command:param:commandType:retry:i40@0:8@16^{PassThrough=...}24i32i36
+//   -PTP_SendCommand:param:retry:        i36@0:8@16^{PassThrough=...}24i32
+//   -PTP_ReceiveData:param:retry:        i36@0:8@16^{PassThrough=...}24i32
+//   -PTP_SendData:param:retry:           i36@0:8@16^{PassThrough=...}24i32
+@interface DeviceInterface (PTP)
+- (int)PTP_Command:(ICCameraDevice *)inCamera
+             param:(SgmPassThrough *)inParam
+       commandType:(int)inType;
+- (int)PTP_Command:(ICCameraDevice *)inCamera
+             param:(SgmPassThrough *)inParam
+       commandType:(int)inType
+             retry:(int)inRetry;
+- (int)PTP_SendCommand:(ICCameraDevice *)inCamera
+                 param:(SgmPassThrough *)inParam
+                 retry:(int)inRetry;
+- (int)PTP_ReceiveData:(ICCameraDevice *)inCamera
+                 param:(SgmPassThrough *)inParam
+                 retry:(int)inRetry;
+- (int)PTP_SendData:(ICCameraDevice *)inCamera
+              param:(SgmPassThrough *)inParam
+              retry:(int)inRetry;
+@end
+
 @interface sgm_ConfigAPI : NSObject
 // PDF: 「API を使用するアプリケーションがカメラに対して最初に発行する命令」
 // 出力として APIConfig IFD (Tag 0001 モデル/0002 シリアル/0003 fw ver/0005 通信 ver)

@@ -54,8 +54,16 @@ Codex の指摘: Wave 1b の壁を「Developer ID 署名不足」と見た仮説
    → **PTP 応答受信時のスタック破壊リスクを除去**。ただし SDK が呼び出し ABI (`sgm_ConfigAPI` /
    `sgm_GetCamStatus2`) 自体は完全一致していたので、Wave 1b の PTP 応答壁の直接原因では
    なさそう。Spike 2/3/4/5 に続く。
-2. **標準 PTP `GetDeviceInfo (0x1001)` を SDK バイパスで直接送信**
-   `sgm_*` を通さず、`ICCameraDevice.requestSendPTPCommand:outData:sendCommandDelegate:didSendCommandSelector:contextInfo:` で `0x1001` を直接送って completion が返るか確認。**返れば ICC transport 層は健全 → SDK 内部の問題に絞れる**、返らなければ ICC/TCC/USB 層の問題
+2. **標準 PTP `GetDeviceInfo (0x1001)` を SDK バイパスで直接送信** (コード実装済み)
+   - **`--spike2`** (ICC 直接): `sgm_*` も SDK の PTP_Command も通さず、Apple ICC
+     `requestSendPTPCommand:` で `0x1001` を直接送って completion が返るか確認
+   - **`--spike2b`** (SDK 内部経由): SDK 内部の `-[DeviceInterface PTP_Command:param:commandType:retry:]`
+     を SgmPassThrough struct 経由で叩き、SDK の PTP transport 層だけを使う対照試験
+   - 4 象限で切り分ける (fpL 接続時実行):
+     - Spike 2 OK / Spike 2b OK → sgm_* 層の問題
+     - Spike 2 OK / Spike 2b NG → SDK 内部経路が壊れている (PTP_Command params 誤り等)
+     - Spike 2 NG / Spike 2b OK → 想定外 (通常起き得ない)
+     - Spike 2 NG / Spike 2b NG → ICC/TCC/USB 層の問題 (Developer ID 署名や TCC 権限)
 3. **main queue 自己待ち対照試験**
    現状 `dispatch_async(dispatch_get_main_queue(), ^{ RunCaptureSequence(cam); ... })` で main queue 上で同期 SDK 呼び出しをしている。**PTP completion が main queue に戻る実装だと deadlock する** ため、専用 worker queue から発行して main queue は完全に runloop pump に専念する構成に切り替えて比較
 4. **`GetCamStatus2` の operationCode1..3 の実値採取**

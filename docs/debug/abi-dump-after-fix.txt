@@ -134,5 +134,6 @@
   SgmCapStatus                    : SDK=CCCSCC                   | @encode=CCCSCC                   | sizeof=7 | MATCH
   SgmDataGroup2                   : SDK=CCCCCCCCCCCCCCCCCC       | @encode=CCCCCCCCCCCCCCCCCC       | sizeof=18 | MATCH
   SgmPictureFileInfoData2         : SDK=CSSS@IISSS@II            | @encode=CSSS@IISSS@II            | sizeof=45 | MATCH
+  SgmPassThrough                  : SDK=S[5I]SII@S[5I]SQ^v       | @encode=S[5I]SII@S[5I]SQ^v       | sizeof=80 | MATCH
 
 # 結果: 0 MISMATCH

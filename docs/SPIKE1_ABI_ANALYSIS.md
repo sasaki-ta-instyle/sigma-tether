@@ -129,12 +129,18 @@ DataGroup を取得できる (offset は多分連続取得用の pagination 引�
 比較に拡張。結果:
 
 ```
-SgmSnapState                    : SDK=CCC                | @encode=CCC                | sizeof=3  | MATCH
-SgmCapStatus                    : SDK=CCCSCC             | @encode=CCCSCC             | sizeof=7  | MATCH
-SgmDataGroup2                   : SDK=CCCCCCCCCCCCCCCCCC | @encode=CCCCCCCCCCCCCCCCCC | sizeof=18 | MATCH
-SgmPictureFileInfoData2         : SDK=CSSS@IISSS@II      | @encode=CSSS@IISSS@II      | sizeof=45 | MATCH
+SgmSnapState            : SDK=CCC                | @encode=CCC                | sizeof=3  | MATCH
+SgmCapStatus            : SDK=CCCSCC             | @encode=CCCSCC             | sizeof=7  | MATCH
+SgmDataGroup2           : SDK=CCCCCCCCCCCCCCCCCC | @encode=CCCCCCCCCCCCCCCCCC | sizeof=18 | MATCH
+SgmPictureFileInfoData2 : SDK=CSSS@IISSS@II      | @encode=CSSS@IISSS@II      | sizeof=45 | MATCH
+SgmPassThrough          : SDK=S[5I]SII@S[5I]SQ^v | @encode=S[5I]SII@S[5I]SQ^v | sizeof=80 | MATCH
 結果: 0 MISMATCH
 ```
+
+`SgmPassThrough` は Wave 1b の 2 巡目 (2026-08-18 セッション後半) で追加。SDK 内部の
+PTP コマンド構造体を byte-exact に宣言し、`--spike2b` で SDK 内部 PTP_Command 経由の
+GetDeviceInfo 送信ができるようになった。同じセッションで `sgm_FreeArrayMemory:` も
+呼び忘れを解消 (Spike 1 副次 TODO #4)。
 
 `./helper/build/sigma-tether-helper --abi-dump` の exit code = 0 で CI-friendly な
 regression detector として機能する (不一致が 1 件でも出れば exit=1)。フルダンプは

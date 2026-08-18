@@ -368,6 +368,18 @@ static int RunCaptureSequence(ICCameraDevice *cam) {
     if (!SgmSucceeded(rc)) return 3;
     LogInfo(@"APIConfig: dataLength=%u directoryCount=%u", apiConfig.dataLength, apiConfig.directoryCount);
 
+    // SDK が alloc した directoryEntry 領域を明示解放 (解放しないとリーク)。
+    // 現状 helper は 1 セッション 1 撮影で exit するので実害は小さいが、
+    // 将来的に長時間 tether するとき (Wave 4 以降) に効く。
+    if (apiConfig.directoryEntry != NULL) {
+        int rfree = [DeviceInterface sgm_FreeArrayMemory:&apiConfig];
+        LogSdk(@"sgm_FreeArrayMemory (ConfigAPI)", rfree);
+        // 解放後は directoryEntry を NULL に (二重解放防止)
+        apiConfig.directoryEntry = NULL;
+        apiConfig.dataLength = 0;
+        apiConfig.directoryCount = 0;
+    }
+
     // ImageQuality = DNG (0x10) を書き込む
     SgmDataGroup2 dg2 = {};
     dg2.ImageQuality = SgmImageQualityDng;
@@ -469,6 +481,46 @@ static NSData * BuildPTPCommandBlock(UInt16 opCode, NSArray<NSNumber *> *params)
         [d appendBytes:&p length:4];
     }
     return d;
+}
+
+// Spike 2b: SDK 内部の PTP_Command 経由で GetDeviceInfo (0x1001) を送る対照。
+// Spike 2 (ICC 直接) と組み合わせて 4 象限で切り分ける:
+//   Spike 2 OK / Spike 2b OK  → ICC も SDK 内部経路も生きている → sgm_* 層の問題
+//   Spike 2 OK / Spike 2b NG  → SDK 内部経路が壊れている (PTP_Command params 誤り等)
+//   Spike 2 NG / Spike 2b OK  → 想定外 (先に ICC が動かないと SDK も動かないはず)
+//   Spike 2 NG / Spike 2b NG  → ICC/TCC/USB 層の問題 (Developer ID 署名や TCC 権限)
+static int RunSpike2bPTPCommand(ICCameraDevice *cam) {
+    LogInfo(@"[spike2b] SDK 内部 PTP_Command 経由で GetDeviceInfo (0x1001) を送信");
+
+    // DeviceInterface のシングルトンを取得
+    DeviceInterface *di = [DeviceInterface sgm_GetActiveDriverInstance];
+    if (!di) {
+        LogInfo(@"[spike2b] sgm_GetActiveDriverInstance が nil → getInstance を試す");
+        di = [DeviceInterface getInstance];
+    }
+    if (!di) {
+        LogErr(@"[spike2b] DeviceInterface instance が取れない");
+        return 1;
+    }
+    LogInfo(@"[spike2b] DeviceInterface instance: %@", di);
+
+    // PassThrough を初期化して 0x1001 を送る
+    SgmPassThrough pt = {};
+    pt.opCode = 0x1001;
+    LogInfo(@"[spike2b] PassThrough size=%zu opCode=0x%04x", sizeof(pt), pt.opCode);
+
+    // commandType = 0 (plain command in-only) を仮定。実値は Spike 4 で確定させる。
+    int rc = [di PTP_Command:cam param:&pt commandType:0 retry:1];
+    LogInfo(@"[spike2b] PTP_Command rc=%d respCode=0x%04x", rc, pt.respCode);
+    if (pt.payloadSize > 0) {
+        LogInfo(@"[spike2b] payload received: %llu bytes", (unsigned long long)pt.payloadSize);
+    }
+    if (pt.respCode == 0x2001 || rc == 0) {
+        LogInfo(@"[spike2b] ✅ 応答受信 (respCode=0x2001)");
+        return 0;
+    }
+    LogErr(@"[spike2b] ❌ 応答なし or エラー (rc=%d respCode=0x%04x)", rc, pt.respCode);
+    return 2;
 }
 
 static int RunSpike2GetDeviceInfo(ICCameraDevice *cam) {
@@ -661,6 +713,12 @@ static const char * TypeEncodingForClassMethod(Class cls, SEL sel) {
     return m ? method_getTypeEncoding(m) : NULL;
 }
 
+// instance method の SEL を method_getTypeEncoding で解決する
+static const char * TypeEncodingForInstanceMethod(Class cls, SEL sel) {
+    Method m = class_getInstanceMethod(cls, sel);
+    return m ? method_getTypeEncoding(m) : NULL;
+}
+
 // 1 struct 分の比較を printf しつつ、mismatch なら global fail flag を立てる
 static int g_abiMismatchCount = 0;
 
@@ -722,13 +780,22 @@ static int VerifyStructAbiMatches(void) {
                   @encode(SgmPictureFileInfoData2 *),
                   sizeof(SgmPictureFileInfoData2));
 
+    // SgmPassThrough: instance method -PTP_Command:param:commandType:retry:
+    // (SDK 内部の PTP 送信構造体。Spike 2b で使う)
+    CompareStruct("SgmPassThrough",
+                  TypeEncodingForInstanceMethod([DeviceInterface class],
+                                                @selector(PTP_Command:param:commandType:retry:)),
+                  @encode(SgmPassThrough *),
+                  sizeof(SgmPassThrough));
+
     printf("\n# 結果: %d MISMATCH\n", g_abiMismatchCount);
     return g_abiMismatchCount;
 }
 
 // spike モード判定用のグローバル
-static BOOL g_spike2Mode = NO;   // 標準 PTP 0x1001 直接送信
-static BOOL g_spike3Mode = NO;   // main queue 自己待ち対照試験 (専用 worker から発行)
+static BOOL g_spike2Mode  = NO;   // 標準 PTP 0x1001 を ICC 直接送信
+static BOOL g_spike2bMode = NO;   // 標準 PTP 0x1001 を SDK 内部 PTP_Command 経由で送信
+static BOOL g_spike3Mode  = NO;   // main queue 自己待ち対照試験 (専用 worker から発行)
 
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
@@ -741,6 +808,9 @@ int main(int argc, const char * argv[]) {
         }
         if (argc >= 2 && strcmp(argv[1], "--spike2") == 0) {
             g_spike2Mode = YES;
+        }
+        if (argc >= 2 && strcmp(argv[1], "--spike2b") == 0) {
+            g_spike2bMode = YES;
         }
         if (argc >= 2 && strcmp(argv[1], "--spike3") == 0) {
             g_spike3Mode = YES;
@@ -796,6 +866,15 @@ int main(int argc, const char * argv[]) {
         // Spike 2 モード: 標準 PTP GetDeviceInfo 直接送信して即終了
         if (g_spike2Mode) {
             int spikeRc = RunSpike2GetDeviceInfo(cam);
+            [cam requestCloseSession];
+            [browser stop];
+            [DeviceInterface sgm_terminateSDK];
+            return spikeRc;
+        }
+
+        // Spike 2b モード: SDK 内部 PTP_Command 経由で 0x1001 を送信
+        if (g_spike2bMode) {
+            int spikeRc = RunSpike2bPTPCommand(cam);
             [cam requestCloseSession];
             [browser stop];
             [DeviceInterface sgm_terminateSDK];
