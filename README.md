@@ -6,25 +6,26 @@ SIGMA fp / fpL を Mac に USB 接続し、**HTML ベースのブラウザ UI**�
 - 対応カメラ: SIGMA fp Ver2.00+ / SIGMA fpL
 - 対応 Mac: macOS 11+ (Apple Silicon は helper が Rosetta 2 実行 — SDK が x86_64 単一スライスのため)
 
-## Phase 構造
+## Phase 構造 (Codex レビュー反映後、2026-08-18)
 
-3 フェーズで段階的に進める（プラン詳細: `/Users/sasatake/.claude/plans/volumes-cameracontrolsdk-for-mac-docume-hidden-curry.md`）:
+3 フェーズで段階的に進める。**日数見積もりは検証ゲート通過後に再見積もる方針**（Wave 1b 閉塞で固定日数の直列計画は既に前提が崩れているため）。詳細プラン: `/Users/sasatake/.claude/plans/volumes-cameracontrolsdk-for-mac-docume-hidden-curry.md`
 
-- **Phase 1 (2〜3 週)** — Mac 版 tether (Rosetta 2 helper)。SIGMA SDK をそのまま使う。**現在ここ**
-- **Phase 1.5 (5〜7 週)** — Mac 版 arm64 native 化。PTP プロトコル解読 → SDK 依存を排除
-- **Phase 2 (3〜4 週)** — iPad/iPhone ネイティブ tether (Xcode Personal Team sideload)
+- **Phase 1** — Mac 版 tether (Rosetta 2 helper)。SIGMA SDK をそのまま使う。**現在ここ、Wave 1b で PTP 応答壁**
+- **Phase 1.5** (クリティカルパス化) — PTP プロトコル解析 + arm64 native 化。**Wave 1b の壁解決 + Phase 2 可否判定を兼ねる**位置に前倒し、Phase 1 と並列
+- **Phase 2** — iPad/iPhone ネイティブ tether (Xcode Personal Team sideload)。成立条件 3 段階スパイクを最優先
 
 ## 進捗
 
-- ✅ Phase 1 Wave 1a: helper が Rosetta 2 で起動、`sgm_initializeSDK` が OK を返す（カメラ無しで検証済み、2026-08-16）
-- ✅ Phase 1.5 準備: `SIGMA_TETHER_TRACE=1` で PTP 送受信バイトを stderr に吐く仕込みを組み込み済
-- ⏳ Phase 1 Wave 1b: fp / fpL 実機で 1 枚 DNG が取れるか（sasaki 手元で試走が必要）
-- ⏭ Phase 1 Wave 2: HTTP + WebSocket + MJPEG サーバ化、LAN 開放（Bonjour / トークン認証は v1 不要）
+- ✅ Phase 1 Wave 1a: helper が Rosetta 2 で起動、`sgm_initializeSDK` が OK を返す（2026-08-16）
+- ✅ Phase 1.5 準備: `SIGMA_TETHER_TRACE=1` で PTP 送受信バイトを stderr に吐く仕込み組み込み済
+- ✅ `.app` バンドル化: Info.plist に `SGM_DEBUG` / `SGM_COMLOG` / `SGM_LOGPATH` / `SGM_TIMEOUT` を仕込み、SDK 内部 debug log がデスクトップに出力される状態
+- 🚧 Phase 1 Wave 1b: fpL 実機で **session Open + content catalog 完了まで到達**、`sgm_ConfigAPI` / `sgm_GetCamStatus2` で **PTP 応答壁 (SGM_TIMEOUT=30秒 retry ループ)**。SIGMA 純正 SampleAPP は同じ fpL で正常動作 → helper 環境の差分が原因。詳細: `docs/WAVE1B_DEBUG_LOG.md`
+- ⏭ Phase 1 Wave 2: HTTP + WebSocket + MJPEG サーバ化（既定 `127.0.0.1`、CLI 引数 `--lan` で開放時のみトークン認証 on）
 - ⏭ Phase 1 Wave 3: HTML UI（dark tone flat）
-- ⏭ Phase 1 Wave 4: 撮影 → Dropbox 保存フロー
+- ⏭ Phase 1 Wave 4: 撮影 → Dropbox 保存フロー（**`GetBigPartialPictFile` の chunk 連結は返却バイトのヘッダ・チェックサム剥がしが必要**、Adobe DNG Converter で開けることが完了条件）
 - ⏭ Phase 1 Wave 5: 設定パネル
 - ⏭ Phase 1 Wave 6: `.app` バンドル化
-- ⏭ Phase 1.5 Wave 1: PTP パケットキャプチャ（Phase 1 と並行可）
+- 🔥 Phase 1.5 前段診断: **Codex レビュー指摘の 5 項目スパイク**（`method_getTypeEncoding` での ABI 照合 / 標準 PTP `0x1001` 直接送信 / main queue 自己待ち対照試験 / SampleAPP LLDB で `operationCode1..3` 実値採取 / `sendCommandDelegate` 経路確認）
 
 SDK API 抽出メモ: `docs/SDK_API_NOTES.md`
 
@@ -89,13 +90,13 @@ SIGMA_TETHER_TRACE=1 ./build/sigma-tether-helper 2>&1 | tee /tmp/sigma-tether-tr
 1. `~/Desktop/sigma-tether-*.dng` を Adobe DNG Converter か Lightroom か `exiftool -a -G0 <file>` で開く
 2. 通れば「実機接続 + 撮影 + ファイル取得」の**構造的な骨**は通ったので Wave 2 (LAN サーバ化) へ進む
 
-### ハマりそうな箇所
+### ハマりそうな箇所（更新: 2026-08-18 Codex レビュー反映）
 
 - **camera が検出されない**: macOS の Image Capture デーモン (`ptpcamerad`) が先に掴んでる可能性 → 一度 `sudo killall ptpcamerad` してから再実行
-- **`sgm_ConfigAPI` が FAIL**: 引数 NULL 渡しが問題の可能性。PDF p.12 の `SgmAdjustmentConfig` 構造体を用意して非 NULL で渡す
+- **`sgm_ConfigAPI` / `sgm_GetCamStatus2` が SGM_TIMEOUT で retry ループ (現在ここ)**: 現時点の仮説は「Objective-C ABI 不一致」「main queue 自己待ち deadlock」「operationCode の実値誤り」「delegate 経路差分」のいずれか。詳細と対処ロードマップは `docs/WAVE1B_DEBUG_LOG.md`
 - **`sgm_SnapCommand` は OK だが CaptStatus が 0x6004 (画像生成失敗) / 0x6005 (一般失敗) で落ちる**: カメラの露出モードが M 以外、レンズが装着されていない、シャッター物理的に切れない状態、など。カメラ本体で 1 枚シャッター切れることを先に確認
 - **`sgm_GetBigPartialPictFile` の chunk が 0 バイトばかり返る**: `storeAddress` の意味を推測ミスしている可能性。`imageID` の代わりに `0` を試すか、`sgm_GetLastCommandData` で PTP 生バイトを覗く
-- **DNG が壊れている**: chunk の連結順が違うか、chunk データにヘッダ/フッタが混じっている。`hexdump -C <file>.dng | head` の先頭 4 バイトが `49 49 2A 00` (little-endian TIFF magic) になっていれば OK
+- **DNG が壊れている** ⚠️ **Codex 指摘の構造リスク**: `GetBigPartialPictFile` の返却サイズはヘッダ・チェックサム込み (PDF 明記) なのに、現在の `main.mm` は全バイトそのまま連結している → Wave 1b の PTP 応答壁を突破しても **DNG が壊れて Lightroom で開けない**未来がある。Wave 4 実装時に chunk ごとに header/footer を剥がして中身だけ連結する。`hexdump -C <file>.dng | head` の先頭 4 バイトが `49 49 2A 00` (little-endian TIFF magic) にならないと NG
 
 ### 生成物をこちらに送る場合
 
@@ -119,4 +120,6 @@ sigma-tether/
 
 ## ライセンス
 
-Private. SIGMA Camera Control SDK は SIGMA Corporation の EULA に従う。
+Private (個人利用のみ、配布予定なし)。
+
+**SIGMA Camera Control SDK for Mac** は SIGMA Corporation の EULA に従う。この repo には SDK 本体の framework バイナリは含まれていない（helper 側の自前宣言ヘッダ / ラッパコードのみ）。ただし将来 `.app` バンドルに 27 framework をコピー・再署名して配布する形態を取る場合は、事前に SIGMA の**再配布条件・リバースエンジニアリング条件を確認**する（Codex レビュー指摘）。個人利用でも配布形態次第で EULA 判断が変わりうる。

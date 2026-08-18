@@ -38,13 +38,37 @@ fpL 実機接続で helper を走らせ、**セッション Open + content catal
 | `sgm_SetComLogFunc:` 事前呼び | あり | あり | ✗ 変わらず |
 | `sgm_SetIsCallComLogFunc(YES)` | あり | あり | (SDK log は出るように) |
 
-## 未検証で試す価値ある項目
+## 未検証で試す価値ある項目 (2026-08-18 Codex レビュー反映で優先順位を再構築)
 
-1. **Developer ID 署名の効果** — SampleAPP は SIGMA が Developer ID で正式署名 (TeamIdentifier=YPD8HGHUQZ)。macOS 15 は ad-hoc 署名だと Camera 系 API の権限が制限される可能性
-2. **`NSMainNibFile = MainMenu` の効果** — SampleAPP は MainMenu.nib を持ち NSApplicationMain で標準起動、我々は init を手動でやる
-3. **`applicationDidFinishLaunching:` 経路での SDK 呼び出し** — SDK が `NSApplication` の起動通知を待って内部状態を初期化する可能性
-4. **USB パケットキャプチャ** (Phase 1.5 でどのみち必要) → SampleAPP と helper の USB PTP パケット差分を採取して、SDK が実際に送っている内容の違いを検証
-5. **SIGMA developer support への問い合わせ** — vendor が持っている実装ガイドラインの共有
+### 【最優先】USB キャプチャ前に helper 単体でできる無料診断 5 件
+
+Codex の指摘: Wave 1b の壁を「Developer ID 署名不足」と見た仮説は**弱い**（PTP 送信処理まで到達しているのが観測できているため）。以下 5 項目を先に消化する。
+
+1. **Objective-C ABI 一致検証**
+   `class_getClassMethod([sgm_ConfigAPI class], @selector(sgm_ConfigAPI:AdjustmentMode:cameraHandle:))` で取得したメソッドの `method_getTypeEncoding()` を dump し、自前宣言と比較。ポインタ幅・`UInt32`・構造体 packing・引数順が一致するかを確認。他の 27 fw クラスの主要 selector も全部照合。**不一致があれば PTP レスポンス受信時に stack を壊して SDK が retry ループに落ちる可能性がある**
+2. **標準 PTP `GetDeviceInfo (0x1001)` を SDK バイパスで直接送信**
+   `sgm_*` を通さず、`ICCameraDevice.requestSendPTPCommand:outData:sendCommandDelegate:didSendCommandSelector:contextInfo:` で `0x1001` を直接送って completion が返るか確認。**返れば ICC transport 層は健全 → SDK 内部の問題に絞れる**、返らなければ ICC/TCC/USB 層の問題
+3. **main queue 自己待ち対照試験**
+   現状 `dispatch_async(dispatch_get_main_queue(), ^{ RunCaptureSequence(cam); ... })` で main queue 上で同期 SDK 呼び出しをしている。**PTP completion が main queue に戻る実装だと deadlock する** ため、専用 worker queue から発行して main queue は完全に runloop pump に専念する構成に切り替えて比較
+4. **`GetCamStatus2` の operationCode1..3 の実値採取**
+   SampleAPP の `-[DeviceInterface PTP_Command:param:commandType:retry:]` に LLDB breakpoint を仕掛けて、SampleAPP が 0x902c を送るときの実 param を採取。**全ゼロで送っている我々の実装と比較**。全ゼロが SIGMA fp/fpL にとって「意味のあるコマンド」でない場合、カメラは応答返さない可能性が高い
+5. **`sendCommandDelegate` の実体・selector・スレッド確認**
+   `class-dump` + LLDB で SampleAPP 実行時に `DeviceInterface` が sendCommandDelegate 引数に何を渡し、`didSendPTPCommand:...` がどのスレッドで発火するかを確認。helper 側と比較して差分があれば callback 経路の穴を特定
+
+これらは helper 単体でできる。**5 項目全部が空振りなら USB キャプチャに進む**。
+
+### 【中優先】USB キャプチャベースの本格 PTP RE (Phase 1.5 Wave 1)
+
+- SampleAPP を fpL に繋いだ状態で `sudo tcpdump -i XHC20 -w sample.pcap`
+- 我々の helper でも同じキャプチャ
+- Wireshark PTP dissector で **バイト単位で差分解析**
+- SIGMA vendor OperationCode の完全表を `docs/PTP_PROTOCOL_NOTES.md` に
+
+### 【低優先】外部確認
+
+- **Developer ID 署名の効果** — 上記 5 項目が全部空振りなら SIGMA から一時的な Developer 証明書を借りて試すか、有料 Apple Developer 加入 ($99/年) で試す
+- **`NSMainNibFile = MainMenu` の効果** — Nib 経由の NSApplicationMain で起動する構成に組み替え
+- **SIGMA developer support への問い合わせ** — vendor が持っている実装ガイドラインの共有交渉
 
 ## 収集済み診断データ
 
@@ -59,14 +83,14 @@ fpL 実機接続で helper を走らせ、**セッション Open + content catal
 - session 確立まで完璧
 - sgm_ 呼び出しで retry ループに入る
 
-## 次に着手すべきこと
+## 次に着手すべきこと (2026-08-18 Codex レビュー反映後)
 
 **優先度順**:
 
-1. **Wave 1b は一旦保留**。Phase 1.5 の USB パケットキャプチャ (PTP RE) を前倒しで着手し、SampleAPP の PTP パケット列を採取
-2. 差分解析で「SDK が SampleAPP のときだけ camera に送っている特定の初期化コマンド」を発見
-3. その初期化を helper に追加して Wave 1b を再開
-4. あるいは並行して SIGMA developer support に問い合わせ（4-5 週待ちを覚悟）
-5. どうしても解決しない場合は Wave 2 以降を Phase 1.5 (arm64 native + PTP RE) にジャンプ
+1. **上記【最優先】5 項目スパイクを消化** — USB キャプチャに行く前に helper 単体で試せる無料テスト群。ABI 照合 → 標準 PTP 直接送信 → main queue 対照試験 → operationCode 実値採取 → delegate 経路確認 の順
+2. **並行: `GetBigPartialPictFile` chunk 連結ロジックの修正着手** — Codex 指摘の構造リスク。返却バイトのヘッダ・チェックサム剥がしを実装しないと Wave 1b が通っても DNG が壊れる
+3. スパイクで原因が絞れれば helper を修正 → Wave 1b 突破 → Wave 2 (HTTP サーバ) に進む
+4. **5 項目全部空振り**なら Phase 1.5 の USB PTP キャプチャに正式着手
+5. **SIGMA vendor OperationCode に暗号化 / 非公開拡張が見つかったら** SIGMA developer support への問い合わせに切り替え (4-5 週待ちを覚悟)、その間は Wave 2〜6 のうち PTP に依存しない部分 (HTTP サーバ / UI シェル / Dropbox 書き込みロジック) を先行実装
 
-**現時点で helper の外形は完成**しているので、PTP プロトコルレベルの初期化ハンドシェイクを解読すればすぐ再開できる。
+**現時点で helper の外形はほぼ完成**しているので、PTP プロトコルレベルの初期化ハンドシェイクを解読すればすぐ再開できる。
