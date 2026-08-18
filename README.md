@@ -29,6 +29,30 @@ SIGMA fp / fpL を Mac に USB 接続し、**HTML ベースのブラウザ UI**�
 
 SDK API 抽出メモ: `docs/SDK_API_NOTES.md`
 
+## Wave 1b スパイク実行方法
+
+Codex レビュー指摘の 5 項目スパイクの実行手順:
+
+```bash
+cd helper && make          # build/sigma-tether-helper + build/SigmaTetherHelper.app
+
+# Spike 1: ABI 一致検証 (カメラ不要、5 秒で完了)
+./build/sigma-tether-helper --abi-dump | tee ../docs/debug/abi-dump-$(date +%F).txt
+
+# Spike 2: 標準 PTP GetDeviceInfo (0x1001) 直接送信 (要カメラ接続)
+sudo killall ptpcamerad 2>/dev/null
+./build/SigmaTetherHelper.app/Contents/MacOS/SigmaTetherHelper --spike2
+
+# Spike 3: main queue 自己待ち対照試験 (専用 worker から SDK 呼び出し、要カメラ)
+sudo killall ptpcamerad 2>/dev/null
+SIGMA_TETHER_TRACE=1 ./build/SigmaTetherHelper.app/Contents/MacOS/SigmaTetherHelper --spike3
+
+# Spike 4 + 5: LLDB で SampleAPP を追いかけて実 param・delegate・スレッドを採取
+bash scripts/spike4_lldb_sample_app.sh
+```
+
+**Spike 1 の結果** (2026-08-18): `docs/SPIKE1_ABI_ANALYSIS.md` 参照。struct 不一致が 4 件発覚（`SgmPictureFileInfoData` は 8→45 バイト、`SgmDataGroup2` は 16→18 バイト等）が、**PTP 送信直接のブロッカーではない可能性が高い**。Spike 2 で ICC transport 層の生死確認が最優先。
+
 ## Wave 1 の実機テスト手順（sasaki 手動）
 
 ### 準備

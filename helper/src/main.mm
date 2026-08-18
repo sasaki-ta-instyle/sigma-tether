@@ -19,10 +19,12 @@
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
 #import <ImageCaptureCore/ImageCaptureCore.h>
+#import <objc/runtime.h>
 #import "SDKGateway.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
+#include <string.h>
 
 // --------------------------------------------------------------------------
 // ロギング
@@ -395,8 +397,237 @@ static int RunCaptureSequence(ICCameraDevice *cam) {
     return 0;
 }
 
+// --------------------------------------------------------------------------
+// Spike 2: 標準 PTP GetDeviceInfo (0x1001) を SDK バイパスで直接送信
+//
+// SIGMA SDK 経由の PTP コマンド (sgm_ConfigAPI 0x9035 / sgm_GetCamStatus2 0x902c)
+// はカメラが応答しない。ICC transport 自体が生きているかを切り分けるため、
+// requestSendPTPCommand: で標準 PTP OperationCode 0x1001 GetDeviceInfo を直接送る。
+// 応答が来れば ICC は生きている → SDK 内部 (delegate 引数・スレッド・struct 引数)
+// の問題に絞れる。応答が来なければ ICC/TCC/USB 層の問題。
+// --------------------------------------------------------------------------
+
+@interface Spike2Delegate : NSObject
+@property (nonatomic, assign) BOOL done;
+@property (nonatomic, assign) BOOL succeeded;
+@property (nonatomic, strong) NSError *error;
+@property (nonatomic, strong) NSData *responseCmd;   // PTP response block
+@property (nonatomic, strong) NSData *inData;        // Data phase (if any)
+- (void)didSendPTPCommand:(NSData *)command
+                   inData:(NSData *)data
+                 response:(NSData *)response
+                    error:(NSError *)error
+              contextInfo:(void *)contextInfo;
+@end
+
+@implementation Spike2Delegate
+- (void)didSendPTPCommand:(NSData *)command
+                   inData:(NSData *)data
+                 response:(NSData *)response
+                    error:(NSError *)error
+              contextInfo:(void *)contextInfo {
+    self.responseCmd = response;
+    self.inData = data;
+    self.error = error;
+    self.succeeded = (error == nil);
+    self.done = YES;
+    LogInfo(@"[spike2] callback thread=%@", [NSThread currentThread].description);
+    LogInfo(@"[spike2] error=%@", error);
+    LogInfo(@"[spike2] response=%@", response);
+    LogInfo(@"[spike2] data=%@", data);
+}
+@end
+
+static NSData * BuildPTPCommandBlock(UInt16 opCode, NSArray<NSNumber *> *params) {
+    // PTP Command Block Container:
+    //   UInt32 length (including itself)
+    //   UInt16 type = 1 (Command)
+    //   UInt16 code = opCode
+    //   UInt32 transactionID = 0
+    //   UInt32 params[0..5]
+    NSUInteger paramCount = MIN(params.count, (NSUInteger)5);
+    UInt32 length = 12 + (UInt32)(paramCount * 4);
+    NSMutableData *d = [NSMutableData dataWithCapacity:length];
+    [d appendBytes:&length length:4];
+    UInt16 type = 1;
+    [d appendBytes:&type length:2];
+    [d appendBytes:&opCode length:2];
+    UInt32 txid = 0;
+    [d appendBytes:&txid length:4];
+    for (NSUInteger i = 0; i < paramCount; i++) {
+        UInt32 p = (UInt32)[params[i] unsignedIntValue];
+        [d appendBytes:&p length:4];
+    }
+    return d;
+}
+
+static int RunSpike2GetDeviceInfo(ICCameraDevice *cam) {
+    LogInfo(@"[spike2] 標準 PTP GetDeviceInfo (0x1001) を直接送信");
+    Spike2Delegate *delegate = [Spike2Delegate new];
+
+    NSData *cmd = BuildPTPCommandBlock(0x1001, @[]);
+    LogInfo(@"[spike2] command block: %@", cmd);
+
+    [cam requestSendPTPCommand:cmd
+                       outData:nil
+           sendCommandDelegate:delegate
+        didSendCommandSelector:@selector(didSendPTPCommand:inData:response:error:contextInfo:)
+                   contextInfo:NULL];
+    LogInfo(@"[spike2] requestSendPTPCommand issued, waiting up to 15s...");
+
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:15.0];
+    while (!delegate.done && [deadline compare:[NSDate date]] == NSOrderedDescending) {
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                 beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    }
+    if (!delegate.done) {
+        LogErr(@"[spike2] タイムアウト: callback が 15 秒で来なかった");
+        return 1;
+    }
+    if (delegate.error) {
+        LogErr(@"[spike2] error: %@", delegate.error);
+        return 2;
+    }
+    LogInfo(@"[spike2] ✅ 応答受信 response=%lu bytes inData=%lu bytes",
+            (unsigned long)delegate.responseCmd.length, (unsigned long)delegate.inData.length);
+
+    // response block 解析
+    if (delegate.responseCmd.length >= 8) {
+        const UInt8 *b = (const UInt8 *)delegate.responseCmd.bytes;
+        UInt32 len = b[0] | (b[1]<<8) | (b[2]<<16) | (b[3]<<24);
+        UInt16 type = b[4] | (b[5]<<8);
+        UInt16 code = b[6] | (b[7]<<8);
+        LogInfo(@"[spike2] response: len=%u type=0x%04x code=0x%04x", len, type, code);
+        // code 0x2001 = OK
+    }
+    return 0;
+}
+
+// --------------------------------------------------------------------------
+// Spike 1: ABI 一致検証 (--abi-dump)
+// SDK が公開ヘッダを持たないため、実 framework 側の method_getTypeEncoding を
+// 全部ダンプして自前宣言 SDKGateway.h との差分を目視で確認する診断コマンド。
+// カメラも NSApp.run も不要。sgm_initializeSDK すら要らない (class ref だけで load される)。
+// --------------------------------------------------------------------------
+
+static void DumpMethodListForClass(Class cls, BOOL isMetaclass) {
+    Class target = isMetaclass ? object_getClass((id)cls) : cls;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(target, &count);
+    const char *tag = isMetaclass ? "+" : "-";
+    printf("=== %s[%s] (%u methods) ===\n", tag, class_getName(cls), count);
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        const char *enc = method_getTypeEncoding(methods[i]);
+        printf("  %s%-70s %s\n", tag, sel_getName(sel), enc ? enc : "(null)");
+    }
+    free(methods);
+}
+
+static void DumpABI(void) {
+    printf("# SDK ABI dump (2026-08-18)\n#\n");
+    printf("# 各 class の class/instance methods とその type encoding を全部吐く。\n");
+    printf("# 自前宣言 SDKGateway.h と比較して packing / 引数順 / 幅の不一致を検出する。\n#\n");
+    printf("# 参考 encoding 表:\n");
+    printf("#   v void, c char, i int32, s int16, l long32, q int64, C uchar, I uint32, S uint16, L ulong32, Q uint64\n");
+    printf("#   f float, d double, B bool, * char*, @ id, # Class, : SEL, ^X ptr to X, {name=fields} struct\n");
+    printf("#   数字は frame offset。例: `i32@0:8@16I24@28` = int返, self@0, _cmd@8, id@16, uint32@24, id@28\n#\n\n");
+
+    // SharedPTP のライフサイクル / ロギング系
+    DumpMethodListForClass([DeviceInterface class], YES);
+    // Operation classes (全部 class methods 化されている)
+    DumpMethodListForClass([sgm_ConfigAPI class], YES);
+    DumpMethodListForClass([sgm_GetCamStatus2 class], YES);
+    DumpMethodListForClass([sgm_GetCamDataGroup2 class], YES);
+    DumpMethodListForClass([sgm_SetCamDataGroup2 class], YES);
+    DumpMethodListForClass([sgm_SnapCommand class], YES);
+    DumpMethodListForClass([sgm_GetCamCaptStatus class], YES);
+    DumpMethodListForClass([sgm_GetPictFileInfo2 class], YES);
+    DumpMethodListForClass([sgm_GetBigPartialPictFile class], YES);
+    DumpMethodListForClass([sgm_ClearImageDBSingle class], YES);
+    DumpMethodListForClass([sgm_CloseApplication class], YES);
+
+    // 参考: DeviceInterface の instance methods (PTP_Command 系がここにいるはず)
+    printf("\n# --- DeviceInterface instance methods (参考: PTP_Command 系) ---\n\n");
+    DumpMethodListForClass([DeviceInterface class], NO);
+}
+
+// --------------------------------------------------------------------------
+// 我々の自前宣言側の encoding を @encode ベースで組み立てる (対照表用)
+// --------------------------------------------------------------------------
+
+static void DumpOurEncodingExpectations(void) {
+    printf("\n# --- 我々の自前宣言 (SDKGateway.h) から @encode で組み立てた期待値 ---\n\n");
+
+    // sgm_ConfigAPI:AdjustmentMode:cameraHandle:
+    printf("+sgm_ConfigAPI:AdjustmentMode:cameraHandle: 期待\n");
+    printf("  return int = %s\n", @encode(int));
+    printf("  arg SgmAdjustmentConfig* = %s\n", @encode(SgmAdjustmentConfig *));
+    printf("  arg UInt32 = %s\n", @encode(UInt32));
+    printf("  arg ICCameraDevice* = %s\n", @encode(ICCameraDevice *));
+
+    printf("\n+sgm_GetCamStatus2:buffLength:recvLength:operationCode1:operationCode2:operationCode3:cameraHandle: 期待\n");
+    printf("  return int = %s\n", @encode(int));
+    printf("  arg void* = %s\n", @encode(void *));
+    printf("  arg UInt32 = %s\n", @encode(UInt32));
+    printf("  arg UInt32* = %s\n", @encode(UInt32 *));
+    printf("  arg UInt32 = %s\n", @encode(UInt32));
+    printf("  arg UInt32 = %s\n", @encode(UInt32));
+    printf("  arg UInt32 = %s\n", @encode(UInt32));
+    printf("  arg ICCameraDevice* = %s\n", @encode(ICCameraDevice *));
+
+    printf("\n+sgm_SnapCommand:cameraHandle: 期待\n");
+    printf("  return int = %s\n", @encode(int));
+    printf("  arg SgmSnapState* = %s (sizeof=%zu)\n", @encode(SgmSnapState *), sizeof(SgmSnapState));
+    printf("  arg ICCameraDevice* = %s\n", @encode(ICCameraDevice *));
+
+    printf("\n+sgm_GetCamCaptStatus:imageID:cameraDevice: 期待\n");
+    printf("  return int = %s\n", @encode(int));
+    printf("  arg SgmCapStatus* = %s (sizeof=%zu)\n", @encode(SgmCapStatus *), sizeof(SgmCapStatus));
+    printf("  arg UInt8 = %s\n", @encode(UInt8));
+    printf("  arg ICCameraDevice* = %s\n", @encode(ICCameraDevice *));
+
+    printf("\n+sgm_SetCamDataGroup2:fieldPresent1:fieldPresent2:cameraHandle: 期待\n");
+    printf("  return int = %s\n", @encode(int));
+    printf("  arg SgmDataGroup2* = %s (sizeof=%zu)\n", @encode(SgmDataGroup2 *), sizeof(SgmDataGroup2));
+    printf("  arg UInt8 fp1 = %s\n", @encode(UInt8));
+    printf("  arg UInt8 fp2 = %s\n", @encode(UInt8));
+    printf("  arg ICCameraDevice* = %s\n", @encode(ICCameraDevice *));
+
+    printf("\n+sgm_GetBigPartialPictFile:start:length:data:dataSize:cameraHandle: 期待\n");
+    printf("  return int = %s\n", @encode(int));
+    printf("  arg storeAddress UInt32 = %s\n", @encode(UInt32));
+    printf("  arg startAddress UInt32 = %s\n", @encode(UInt32));
+    printf("  arg maxLength UInt32 = %s\n", @encode(UInt32));
+    printf("  arg data UInt8** = %s\n", @encode(UInt8 **));
+    printf("  arg dataSize UInt32* = %s\n", @encode(UInt32 *));
+    printf("  arg ICCameraDevice* = %s\n", @encode(ICCameraDevice *));
+
+    printf("\n+sgm_GetPictFileInfo2:cameraHandle: 期待\n");
+    printf("  return int = %s\n", @encode(int));
+    printf("  arg SgmPictureFileInfoData2* = %s (sizeof=%zu)\n", @encode(SgmPictureFileInfoData2 *), sizeof(SgmPictureFileInfoData2));
+    printf("  arg ICCameraDevice* = %s\n", @encode(ICCameraDevice *));
+}
+
+// spike モード判定用のグローバル
+static BOOL g_spike2Mode = NO;   // 標準 PTP 0x1001 直接送信
+static BOOL g_spike3Mode = NO;   // main queue 自己待ち対照試験 (専用 worker から発行)
+
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
+        // 診断コマンド分岐
+        if (argc >= 2 && strcmp(argv[1], "--abi-dump") == 0) {
+            DumpABI();
+            DumpOurEncodingExpectations();
+            return 0;
+        }
+        if (argc >= 2 && strcmp(argv[1], "--spike2") == 0) {
+            g_spike2Mode = YES;
+        }
+        if (argc >= 2 && strcmp(argv[1], "--spike3") == 0) {
+            g_spike3Mode = YES;
+        }
+
         LogInfo(@"===== sigma-tether helper Wave 1 PoC =====");
         LogInfo(@"process arch: %s", (sizeof(void*) == 8 ? "64-bit" : "32-bit"));
         LogInfo(@"mainBundle bundlePath: %@", [NSBundle mainBundle].bundlePath);
@@ -442,7 +673,18 @@ int main(int argc, const char * argv[]) {
             [DeviceInterface sgm_terminateSDK];
             return 3;
         }
-        LogInfo(@"camera fully ready, entering capture sequence");
+        LogInfo(@"camera fully ready");
+
+        // Spike 2 モード: 標準 PTP GetDeviceInfo 直接送信して即終了
+        if (g_spike2Mode) {
+            int spikeRc = RunSpike2GetDeviceInfo(cam);
+            [cam requestCloseSession];
+            [browser stop];
+            [DeviceInterface sgm_terminateSDK];
+            return spikeRc;
+        }
+
+        LogInfo(@"entering capture sequence");
 
         // ここで初めて NSApplication を用意し、NSApp.run で本格的な Cocoa
         // event loop に入る。sgm_ConfigAPI 等の SDK 呼び出しは requestSendPTPCommand
@@ -450,25 +692,35 @@ int main(int argc, const char * argv[]) {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
 
-        // NSApp.run が Cocoa event loop を start してから、メインキューに
-        // sgm_ 呼び出しを dispatch する。SampleAPP のボタンハンドラと同じ
-        // 挙動: sgm_ はメインスレッドで実行され、SGMLock 内で待機する間も
-        // ICC の XPC callback は別キューで走って正常に応答を返す想定。
+        // Spike 3 (--spike3): 専用 worker queue から SDK 呼び出しを発行し、
+        //   main queue は完全に runloop pump に専念する対照試験。
+        //   PTP completion callback が main thread で発火する実装だと、
+        //   main queue で同期 SDK 呼び出しをすると self-wait deadlock する仮説の検証。
+        // 既定: これまで通り main queue に dispatch (SampleAPP のボタンハンドラと同じ挙動)
         __block int runRc = -1;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            runRc = RunCaptureSequence(cam);
+        void (^wake_and_stop)(void) = ^{
             [NSApp stop:nil];
             NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
                                               location:NSMakePoint(0, 0)
-                                         modifierFlags:0
-                                             timestamp:0
-                                          windowNumber:0
-                                               context:nil
-                                               subtype:0
-                                                 data1:0
-                                                 data2:0];
+                                         modifierFlags:0 timestamp:0
+                                          windowNumber:0 context:nil
+                                               subtype:0 data1:0 data2:0];
             [NSApp postEvent:wake atStart:YES];
-        });
+        };
+        if (g_spike3Mode) {
+            LogInfo(@"[spike3] 専用 worker queue から SDK 呼び出しを発行");
+            dispatch_queue_t worker = dispatch_queue_create("sgm.worker", DISPATCH_QUEUE_SERIAL);
+            dispatch_async(worker, ^{
+                runRc = RunCaptureSequence(cam);
+                LogInfo(@"[spike3] worker: RunCaptureSequence rc=%d", runRc);
+                dispatch_async(dispatch_get_main_queue(), wake_and_stop);
+            });
+        } else {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                runRc = RunCaptureSequence(cam);
+                wake_and_stop();
+            });
+        }
         [NSApp run];
         LogInfo(@"RunCaptureSequence rc=%d", runRc);
 

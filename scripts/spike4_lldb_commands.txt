@@ -1,0 +1,82 @@
+# LLDB script: SampleAPP を走らせて SIGMA SDK 内部の PTP コマンド送信時の
+# 引数・スレッド・delegate 実体を採取する (Spike 4 + 5 兼用)
+#
+# 使い方:
+#   (lldb) source scripts/spike4_lldb_commands.txt
+#   (lldb) run
+#
+# 想定シナリオ:
+#   SampleAPP がカメラ検出→ConfigAPI→GetCamStatus2 の polling を始めると、
+#   下記の breakpoint が順次 hit する。各 hit で自動的に情報を dump して continue。
+
+# ========================================================================
+# Breakpoint 1: sgm_GetCamStatus2 の 7 引数版 (0x902c を発行する箇所)
+# operationCode1..3 の実値を採取。x86_64 呼び出し規約:
+#   $rdi = Class (self)
+#   $rsi = SEL (_cmd)
+#   $rdx = arg1 (outBuffer, void*)
+#   $rcx = arg2 (buffLength, UInt32)
+#   $r8  = arg3 (recvLength, UInt32*)
+#   $r9  = arg4 (operationCode1, UInt32)  ← 採取したい
+#   16(%rsp) = arg5 (operationCode2, UInt32)  ← 採取したい
+#   24(%rsp) = arg6 (operationCode3, UInt32)  ← 採取したい
+#   32(%rsp) = arg7 (cameraHandle, id)
+# ========================================================================
+breakpoint set --name "+[sgm_GetCamStatus2 sgm_GetCamStatus2:buffLength:recvLength:operationCode1:operationCode2:operationCode3:cameraHandle:]"
+breakpoint command add --script-type default
+p (uint32_t)$rcx
+memory read --format x --size 4 --count 1 $r8
+p (uint32_t)$r9
+memory read --format x --size 4 --count 3 $rsp+16
+memory read --format x --size 8 --count 1 $rsp+40
+bt 5
+continue
+DONE
+
+# ========================================================================
+# Breakpoint 2: PTP_Command:param:commandType:retry: (最内 PTP 送信 wrapper)
+# param (PassThrough struct) の中身を dump
+# ========================================================================
+breakpoint set --name "-[DeviceInterface PTP_Command:param:commandType:retry:]"
+breakpoint command add --script-type default
+p $arg1
+p $arg2
+memory read --format x --size 4 --count 20 $rdx
+p (int)$rcx
+p (int)$r8
+bt 5
+continue
+DONE
+
+# ========================================================================
+# Breakpoint 3: didSendPTPCommand callback (どのスレッドで発火するか)
+# ========================================================================
+breakpoint set --name "-[DeviceInterface didSendPTPCommand:inData:response:error:contextInfo:]"
+breakpoint command add --script-type default
+p (int)pthread_mach_thread_np(pthread_self())
+p (char*)dispatch_queue_get_label((void*)0)
+p $rdx
+p $rcx
+p $r8
+p (void*)$r9
+bt 5
+continue
+DONE
+
+# ========================================================================
+# Breakpoint 4: requestSendPTPCommand の呼び出し (sendCommandDelegate 実体を採取)
+# ========================================================================
+breakpoint set --name "-[ICCameraDevice requestSendPTPCommand:outData:sendCommandDelegate:didSendCommandSelector:contextInfo:]"
+breakpoint command add --script-type default
+memory read --format x --size 4 --count 8 $rdx
+p (void*)$rcx
+po (id)$r8
+p (SEL)$r9
+memory read --format s --size 1 --count 1 $r9
+continue
+DONE
+
+# ========================================================================
+# 全 breakpoint 一覧を表示して確認
+# ========================================================================
+breakpoint list
